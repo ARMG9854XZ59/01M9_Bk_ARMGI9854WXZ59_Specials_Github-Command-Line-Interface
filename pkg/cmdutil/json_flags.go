@@ -25,9 +25,33 @@ type JSONFlagError struct {
 
 func AddJSONFlags(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
 	f := cmd.Flags()
+	addJsonFlag(f)
+	addJqFlag(f, "q")
+	addTemplateFlag(f, "t")
+
+	setupJsonFlags(cmd, exportTarget, fields)
+}
+
+func AddJSONFlagsWithoutShorthand(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
+	f := cmd.Flags()
+	addJsonFlag(f)
+	addJqFlag(f, "")
+	addTemplateFlag(f, "")
+
+	setupJsonFlags(cmd, exportTarget, fields)
+}
+
+func addJsonFlag(f *pflag.FlagSet) {
 	f.StringSlice("json", nil, "Output JSON with the specified `fields`")
-	f.StringP("jq", "q", "", "Filter JSON output using a jq `expression`")
-	f.StringP("template", "t", "", "Format JSON output using a Go template; see \"gh help formatting\"")
+}
+func addJqFlag(f *pflag.FlagSet, shorthand string) {
+	f.StringP("jq", shorthand, "", "Filter JSON output using a jq `expression`")
+}
+func addTemplateFlag(f *pflag.FlagSet, shorthand string) {
+	f.StringP("template", shorthand, "", "Format JSON output using a Go template; see \"gh help formatting\"")
+}
+
+func setupJsonFlags(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
 
 	_ = cmd.RegisterFlagCompletionFunc("json", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		var results []string
@@ -173,7 +197,7 @@ func checkFormatFlags(cmd *cobra.Command) (*jsonExporter, error) {
 
 type Exporter interface {
 	Fields() []string
-	Write(io *iostreams.IOStreams, data interface{}) error
+	Write(io *iostreams.IOStreams, data any) error
 }
 
 type jsonExporter struct {
@@ -198,7 +222,7 @@ func (e *jsonExporter) SetFields(fields []string) {
 // Write serializes data into JSON output written to w. If the object passed as data implements exportable,
 // or if data is a map or slice of exportable object, ExportData() will be called on each object to obtain
 // raw data for serialization.
-func (e *jsonExporter) Write(ios *iostreams.IOStreams, data interface{}) error {
+func (e *jsonExporter) Write(ios *iostreams.IOStreams, data any) error {
 	buf := bytes.Buffer{}
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
@@ -232,14 +256,14 @@ func (e *jsonExporter) Write(ios *iostreams.IOStreams, data interface{}) error {
 	return err
 }
 
-func (e *jsonExporter) exportData(v reflect.Value) interface{} {
+func (e *jsonExporter) exportData(v reflect.Value) any {
 	switch v.Kind() {
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Pointer, reflect.Interface:
 		if !v.IsNil() {
 			return e.exportData(v.Elem())
 		}
 	case reflect.Slice:
-		a := make([]interface{}, v.Len())
+		a := make([]any, v.Len())
 		for i := 0; i < v.Len(); i++ {
 			a[i] = e.exportData(v.Index(i))
 		}
@@ -254,7 +278,7 @@ func (e *jsonExporter) exportData(v reflect.Value) interface{} {
 		}
 		return m.Interface()
 	case reflect.Struct:
-		if v.CanAddr() && reflect.PtrTo(v.Type()).Implements(exportableType) {
+		if v.CanAddr() && reflect.PointerTo(v.Type()).Implements(exportableType) {
 			ve := v.Addr().Interface().(exportable)
 			return ve.ExportData(e.fields)
 		} else if v.Type().Implements(exportableType) {
@@ -266,12 +290,11 @@ func (e *jsonExporter) exportData(v reflect.Value) interface{} {
 }
 
 type exportable interface {
-	ExportData([]string) map[string]interface{}
+	ExportData([]string) map[string]any
 }
 
-var exportableType = reflect.TypeOf((*exportable)(nil)).Elem()
-var sliceOfEmptyInterface []interface{}
-var emptyInterfaceType = reflect.TypeOf(sliceOfEmptyInterface).Elem()
+var exportableType = reflect.TypeFor[exportable]()
+var emptyInterfaceType = reflect.TypeFor[[]any]().Elem()
 
 // Basic function that can be used with structs that need to implement
 // the exportable interface. It has numerous limitations so verify
@@ -280,16 +303,16 @@ var emptyInterfaceType = reflect.TypeOf(sliceOfEmptyInterface).Elem()
 // Perhaps this should be moved up into exportData for the case when
 // a struct does not implement the exportable interface, but for now it will
 // need to be explicitly used.
-func StructExportData(s interface{}, fields []string) map[string]interface{} {
+func StructExportData(s any, fields []string) map[string]any {
 	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
 		// If s is not a struct or pointer to a struct return nil.
 		return nil
 	}
-	data := make(map[string]interface{}, len(fields))
+	data := make(map[string]any, len(fields))
 	for _, f := range fields {
 		sf := fieldByName(v, f)
 		if sf.IsValid() && sf.CanInterface() {

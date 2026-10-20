@@ -15,6 +15,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/utils"
@@ -43,13 +44,13 @@ func NewCmdCredits(f *cmdutil.Factory, runF func(*CreditsOptions) error) *cobra.
 		Short: "View credits for this tool",
 		Long:  `View animated credits for gh, the tool you are currently using :)`,
 		Example: heredoc.Doc(`
-			# see a credits animation for this project
+			# See a credits animation for this project
 			$ gh credits
 
-			# display a non-animated thank you
+			# Display a non-animated thank you
 			$ gh credits -s
 
-			# just print the contributors, one per line
+			# Just print the contributors, one per line
 			$ gh credits | cat
 		`),
 		Args: cobra.ExactArgs(0),
@@ -79,16 +80,16 @@ func NewCmdRepoCredits(f *cmdutil.Factory, runF func(*CreditsOptions) error) *co
 		Use:   "credits [<repository>]",
 		Short: "View credits for a repository",
 		Example: heredoc.Doc(`
-			# view credits for the current repository
+			# View credits for the current repository
 			$ gh repo credits
 
-			# view credits for a specific repository
+			# View credits for a specific repository
 			$ gh repo credits cool/repo
 
-			# print a non-animated thank you
+			# Print a non-animated thank you
 			$ gh repo credits -s
 
-			# pipe to just print the contributors, one per line
+			# Pipe to just print the contributors, one per line
 			$ gh repo credits | cat
 		`),
 		Args: cobra.MaximumNArgs(1),
@@ -142,9 +143,12 @@ func creditsRun(opts *CreditsOptions) error {
 
 	result := Result{}
 	body := bytes.NewBufferString("")
-	path := fmt.Sprintf("repos/%s/%s/contributors", baseRepo.RepoOwner(), baseRepo.RepoName())
+	path, err := safeurl.JoinPath("repos", baseRepo.RepoOwner(), baseRepo.RepoName(), "contributors")
+	if err != nil {
+		return err
+	}
 
-	err = client.REST(baseRepo.RepoHost(), "GET", path, body, &result)
+	err = client.REST(baseRepo.RepoHost(), "GET", path.String(), body, &result)
 	if err != nil {
 		return err
 	}
@@ -246,26 +250,26 @@ func creditsRun(opts *CreditsOptions) error {
 }
 
 func starLine(r *rand.Rand, width int) string {
-	line := ""
+	var line strings.Builder
 	starChance := 0.1
-	for y := 0; y < width; y++ {
+	for range width {
 		chance := r.Float64()
 		if chance <= starChance {
 			charRoll := r.Float64()
 			switch {
 			case charRoll < 0.3:
-				line += "."
+				line.WriteString(".")
 			case charRoll > 0.3 && charRoll < 0.6:
-				line += "+"
+				line.WriteString("+")
 			default:
-				line += "*"
+				line.WriteString("*")
 			}
 		} else {
-			line += " "
+			line.WriteString(" ")
 		}
 	}
 
-	return line
+	return line.String()
 }
 
 func twinkle(starLine string) string {

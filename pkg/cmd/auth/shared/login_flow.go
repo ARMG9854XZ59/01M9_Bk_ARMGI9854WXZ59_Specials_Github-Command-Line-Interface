@@ -1,8 +1,6 @@
 package shared
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,7 +11,7 @@ import (
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/authflow"
 	"github.com/cli/cli/v2/internal/browser"
-	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/pkg/cmd/ssh-key/add"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/ssh"
@@ -30,6 +28,7 @@ type LoginOptions struct {
 	IO               *iostreams.IOStreams
 	Config           iconfig
 	HTTPClient       *http.Client
+	PlainHTTPClient  *http.Client
 	Hostname         string
 	Interactive      bool
 	Web              bool
@@ -40,8 +39,17 @@ type LoginOptions struct {
 	CredentialFlow   *GitCredentialFlow
 	SecureStorage    bool
 	SkipSSHKeyPrompt bool
+	CopyToClipboard  bool
 
 	sshContext ssh.Context
+}
+
+// ShouldCopyToClipboard resolves an explicit flag value before falling back to configuration.
+func ShouldCopyToClipboard(cfg gh.Config, flagValue *bool) bool {
+	if flagValue != nil {
+		return *flagValue
+	}
+	return cfg.Clipboard().Value == "enabled"
 }
 
 func Login(opts *LoginOptions) error {
@@ -148,7 +156,7 @@ func Login(opts *LoginOptions) error {
 
 	if authMode == 0 {
 		var err error
-		authToken, username, err = authflow.AuthFlow(hostname, opts.IO, "", append(opts.Scopes, additionalScopes...), opts.Interactive, opts.Browser)
+		authToken, username, err = authflow.AuthFlow(opts.PlainHTTPClient, hostname, opts.IO, "", append(opts.Scopes, additionalScopes...), opts.Interactive, opts.Browser, opts.CopyToClipboard)
 		if err != nil {
 			return fmt.Errorf("failed to authenticate via web browser: %w", err)
 		}
@@ -247,33 +255,21 @@ func sshKeyUpload(httpClient *http.Client, hostname, keyFile string, title strin
 	return add.SSHKeyUpload(httpClient, hostname, f, title)
 }
 
-func GetCurrentLogin(httpClient httpClient, hostname, authToken string) (string, error) {
-	query := `query UserCurrent{viewer{login}}`
-	reqBody, err := json.Marshal(map[string]interface{}{"query": query})
+// GetCurrentLogin returns the login of the user the token belongs to.
+//
+// The token is passed explicitly because this runs before the token is stored in config, so
+// the transport has nothing to attach. The transport only sets Authorization when it is
+// absent, so the header set here wins.
+func GetCurrentLogin(httpClient *http.Client, hostname, authToken string) (string, error) {
+	var result struct{ Viewer struct{ Login string } }
+
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	err := api.NewClientFromHTTP(httpClient).GraphQL(hostname, `query UserCurrent{viewer{login}}`, nil, &result,
+		api.WithHeader("Authorization", "token "+authToken))
 	if err != nil {
 		return "", err
 	}
-	result := struct {
-		Data struct{ Viewer struct{ Login string } }
-	}{}
-	apiEndpoint := ghinstance.GraphQLEndpoint(hostname)
-	req, err := http.NewRequest("POST", apiEndpoint, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "token "+authToken)
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer res.Body.Close()
-	if res.StatusCode > 299 {
-		return "", api.HandleHTTPError(res)
-	}
-	decoder := json.NewDecoder(res.Body)
-	err = decoder.Decode(&result)
-	if err != nil {
-		return "", err
-	}
-	return result.Data.Viewer.Login, nil
+	return result.Viewer.Login, nil
 }

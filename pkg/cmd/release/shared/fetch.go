@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/shurcooL/githubv4"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +30,7 @@ var ReleaseFields = []string{
 	"id",
 	"isDraft",
 	"isPrerelease",
+	"isImmutable",
 	"name",
 	"publishedAt",
 	"tagName",
@@ -48,6 +49,7 @@ type Release struct {
 	Body         string     `json:"body"`
 	IsDraft      bool       `json:"draft"`
 	IsPrerelease bool       `json:"prerelease"`
+	IsImmutable  bool       `json:"immutable"`
 	CreatedAt    time.Time  `json:"created_at"`
 	PublishedAt  *time.Time `json:"published_at"`
 
@@ -71,6 +73,7 @@ type ReleaseAsset struct {
 	Name   string
 	Label  string
 	Size   int64
+	Digest *string
 	State  string
 	APIURL string `json:"url"`
 
@@ -81,32 +84,33 @@ type ReleaseAsset struct {
 	BrowserDownloadURL string    `json:"browser_download_url"`
 }
 
-func (rel *Release) ExportData(fields []string) map[string]interface{} {
+func (rel *Release) ExportData(fields []string) map[string]any {
 	v := reflect.ValueOf(rel).Elem()
 	fieldByName := func(v reflect.Value, field string) reflect.Value {
 		return v.FieldByNameFunc(func(s string) bool {
 			return strings.EqualFold(field, s)
 		})
 	}
-	data := map[string]interface{}{}
+	data := map[string]any{}
 
 	for _, f := range fields {
 		switch f {
 		case "author":
-			data[f] = map[string]interface{}{
+			data[f] = map[string]any{
 				"id":    rel.Author.ID,
 				"login": rel.Author.Login,
 			}
 		case "assets":
-			assets := make([]interface{}, 0, len(rel.Assets))
+			assets := make([]any, 0, len(rel.Assets))
 			for _, a := range rel.Assets {
-				assets = append(assets, map[string]interface{}{
+				assets = append(assets, map[string]any{
 					"url":           a.BrowserDownloadURL,
 					"apiUrl":        a.APIURL,
 					"id":            a.ID,
 					"name":          a.Name,
 					"label":         a.Label,
 					"size":          a.Size,
+					"digest":        a.Digest,
 					"state":         a.State,
 					"createdAt":     a.CreatedAt,
 					"updatedAt":     a.UpdatedAt,
@@ -124,22 +128,70 @@ func (rel *Release) ExportData(fields []string) map[string]interface{} {
 	return data
 }
 
-var errNotFound = errors.New("release not found")
+var ErrReleaseNotFound = errors.New("release not found")
 
 type fetchResult struct {
 	release *Release
 	error   error
 }
 
+func FetchRefSHA(ctx context.Context, httpClient *http.Client, repo ghrepo.Interface, tagName string) (string, error) {
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "git", "ref", fmt.Sprintf("tags/%s", tagName))
+	if err != nil {
+		return "", err
+	}
+
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	resp, err := api.NewClientFromHTTP(httpClient).RequestWithContext(ctx, repo.RepoHost(), http.MethodGet, path.String(), nil)
+	if err != nil {
+		if isNotFound(err) {
+			return "", ErrReleaseNotFound
+		}
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&ref); err != nil {
+		return "", fmt.Errorf("failed to parse ref response: %w", err)
+	}
+
+	return ref.Object.SHA, nil
+}
+
+// DigestAlgForRef returns the digest algorithm name corresponding to the given
+// git ref SHA. SHA-1 git object IDs are 40 hex characters and SHA-256 git
+// object IDs are 64 hex characters. Unknown lengths default to "sha1" to
+// preserve backwards-compatible behavior.
+func DigestAlgForRef(digest string) string {
+	switch len(digest) {
+	case 64:
+		return "sha256"
+	default:
+		return "sha1"
+	}
+}
+
 // FetchRelease finds a published repository release by its tagName, or a draft release by its pending tag name.
 func FetchRelease(ctx context.Context, httpClient *http.Client, repo ghrepo.Interface, tagName string) (*Release, error) {
+	publishedPath, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases", "tags", tagName)
+	if err != nil {
+		return nil, err
+	}
+
 	cc, cancel := context.WithCancel(ctx)
 	results := make(chan fetchResult, 2)
 
 	// published release lookup
 	go func() {
-		path := fmt.Sprintf("repos/%s/%s/releases/tags/%s", repo.RepoOwner(), repo.RepoName(), tagName)
-		release, err := fetchReleasePath(cc, httpClient, repo.RepoHost(), path)
+		release, err := fetchReleasePath(cc, httpClient, repo.RepoHost(), publishedPath)
 		results <- fetchResult{release: release, error: err}
 	}()
 
@@ -149,20 +201,35 @@ func FetchRelease(ctx context.Context, httpClient *http.Client, repo ghrepo.Inte
 		results <- fetchResult{release: release, error: err}
 	}()
 
-	res := <-results
-	if errors.Is(res.error, errNotFound) {
-		res = <-results
-		cancel() // satisfy the linter even though no goroutines are running anymore
-	} else {
+	// Prefer a release found by either lookup. A single failed lookup, such as
+	// the draft lookup when unauthenticated, must not mask a release found by
+	// the other; only report an error when both lookups fail.
+	first := <-results
+	if first.error == nil {
 		cancel()
 		<-results // drain the channel
+		return first.release, nil
 	}
-	return res.release, res.error
+
+	second := <-results
+	cancel() // satisfy the linter even though no goroutines are running anymore
+	if second.error == nil {
+		return second.release, nil
+	}
+
+	// Both lookups failed; prefer reporting the release as not found.
+	if errors.Is(second.error, ErrReleaseNotFound) {
+		return nil, second.error
+	}
+	return nil, first.error
 }
 
 // FetchLatestRelease finds the latest published release for a repository.
 func FetchLatestRelease(ctx context.Context, httpClient *http.Client, repo ghrepo.Interface) (*Release, error) {
-	path := fmt.Sprintf("repos/%s/%s/releases/latest", repo.RepoOwner(), repo.RepoName())
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases", "latest")
+	if err != nil {
+		return nil, err
+	}
 	return fetchReleasePath(ctx, httpClient, repo.RepoHost(), path)
 }
 
@@ -178,7 +245,7 @@ func fetchDraftRelease(ctx context.Context, httpClient *http.Client, repo ghrepo
 		} `graphql:"repository(owner: $owner, name: $name)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner":   githubv4.String(repo.RepoOwner()),
 		"name":    githubv4.String(repo.RepoName()),
 		"tagName": githubv4.String(tagName),
@@ -190,33 +257,30 @@ func fetchDraftRelease(ctx context.Context, httpClient *http.Client, repo ghrepo
 	}
 
 	if query.Repository.Release == nil || !query.Repository.Release.IsDraft {
-		return nil, errNotFound
+		return nil, ErrReleaseNotFound
 	}
 
 	// Then, use REST to get information about the draft release. In theory, we could have fetched
 	// all the necessary information via GraphQL, but REST is safer for backwards compatibility.
-	path := fmt.Sprintf("repos/%s/%s/releases/%d", repo.RepoOwner(), repo.RepoName(), query.Repository.Release.DatabaseID)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases", strconv.FormatInt(query.Repository.Release.DatabaseID, 10))
+	if err != nil {
+		return nil, err
+	}
 	return fetchReleasePath(ctx, httpClient, repo.RepoHost(), path)
 }
 
-func fetchReleasePath(ctx context.Context, httpClient *http.Client, host string, p string) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", ghinstance.RESTPrefix(host)+p, nil)
+func fetchReleasePath(ctx context.Context, httpClient *http.Client, host string, path safeurl.SafeURL) (*Release, error) {
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	resp, err := api.NewClientFromHTTP(httpClient).RequestWithContext(ctx, host, http.MethodGet, path.String(), nil)
 	if err != nil {
-		return nil, err
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
+		if isNotFound(err) {
+			return nil, ErrReleaseNotFound
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, errNotFound
-	} else if resp.StatusCode > 299 {
-		return nil, api.HandleHTTPError(resp)
-	}
 
 	var release Release
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
@@ -224,6 +288,14 @@ func fetchReleasePath(ctx context.Context, httpClient *http.Client, host string,
 	}
 
 	return &release, nil
+}
+
+// isNotFound reports whether err is an API error carrying a 404 status. The release lookups
+// treat a missing release as a sentinel rather than an error, and the api client reports the
+// status through an HTTPError rather than through a response the call site can inspect.
+func isNotFound(err error) bool {
+	httpErr, ok := errors.AsType[api.HTTPError](err)
+	return ok && httpErr.StatusCode == http.StatusNotFound
 }
 
 func StubFetchRelease(t *testing.T, reg *httpmock.Registry, owner, repoName, tagName, responseBody string) {
@@ -238,11 +310,19 @@ func StubFetchRelease(t *testing.T, reg *httpmock.Registry, owner, repoName, tag
 		reg.Register(
 			httpmock.GraphQL(`query RepositoryReleaseByTag\b`),
 			httpmock.GraphQLQuery(`{ "data": { "repository": { "release": null }}}`,
-				func(q string, vars map[string]interface{}) {
+				func(q string, vars map[string]any) {
 					assert.Equal(t, owner, vars["owner"])
 					assert.Equal(t, repoName, vars["name"])
 					assert.Equal(t, tagName, vars["tagName"])
 				}),
 		)
 	}
+}
+
+func StubFetchRefSHA(t *testing.T, reg *httpmock.Registry, owner, repoName, tagName, sha string) {
+	path := fmt.Sprintf("repos/%s/%s/git/ref/tags%%2F%s", owner, repoName, tagName)
+	reg.Register(
+		httpmock.REST("GET", path),
+		httpmock.StringResponse(fmt.Sprintf(`{"object": {"sha": "%s"}}`, sha)),
+	)
 }

@@ -3,6 +3,7 @@ package refresh
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/MakeNowJust/heredoc"
@@ -21,11 +22,11 @@ type token string
 type username string
 
 type RefreshOptions struct {
-	IO         *iostreams.IOStreams
-	Config     func() (gh.Config, error)
-	HttpClient *http.Client
-	GitClient  *git.Client
-	Prompter   shared.Prompt
+	IO              *iostreams.IOStreams
+	Config          func() (gh.Config, error)
+	PlainHttpClient func() (*http.Client, error)
+	GitClient       *git.Client
+	Prompter        shared.Prompt
 
 	MainExecutable string
 
@@ -33,30 +34,32 @@ type RefreshOptions struct {
 	Scopes       []string
 	RemoveScopes []string
 	ResetScopes  bool
-	AuthFlow     func(*iostreams.IOStreams, string, []string, bool) (token, username, error)
+	AuthFlow     func(*http.Client, *iostreams.IOStreams, string, []string, bool, bool) (token, username, error)
 
 	Interactive     bool
 	InsecureStorage bool
+	Clipboard       *bool
 }
 
 func NewCmdRefresh(f *cmdutil.Factory, runF func(*RefreshOptions) error) *cobra.Command {
 	opts := &RefreshOptions{
 		IO:     f.IOStreams,
 		Config: f.Config,
-		AuthFlow: func(io *iostreams.IOStreams, hostname string, scopes []string, interactive bool) (token, username, error) {
-			t, u, err := authflow.AuthFlow(hostname, io, "", scopes, interactive, f.Browser)
+		AuthFlow: func(httpClient *http.Client, io *iostreams.IOStreams, hostname string, scopes []string, interactive bool, clipboard bool) (token, username, error) {
+			t, u, err := authflow.AuthFlow(httpClient, hostname, io, "", scopes, interactive, f.Browser, clipboard)
 			return token(t), username(u), err
 		},
-		HttpClient: &http.Client{},
-		GitClient:  f.GitClient,
-		Prompter:   f.Prompter,
+		PlainHttpClient: f.PlainHttpClient,
+		GitClient:       f.GitClient,
+		Prompter:        f.Prompter,
 	}
 
 	cmd := &cobra.Command{
 		Use:   "refresh",
 		Args:  cobra.ExactArgs(0),
 		Short: "Refresh stored authentication credentials",
-		Long: heredoc.Docf(`Expand or fix the permission scopes for stored credentials for active account.
+		Long: heredoc.Docf(`
+			Expand or fix the permission scopes for stored credentials for active account.
 
 			The %[1]s--scopes%[1]s flag accepts a comma separated list of scopes you want
 			your gh credentials to have. If no scopes are provided, the command
@@ -72,19 +75,25 @@ func NewCmdRefresh(f *cmdutil.Factory, runF func(*RefreshOptions) error) *cobra.
 			If you have multiple accounts in %[1]sgh auth status%[1]s and want to refresh the credentials for an
 			inactive account, you will have to use %[1]sgh auth switch%[1]s to that account first before using
 			this command, and then switch back when you are done.
+
+			For more information on OAuth scopes, see
+			<https://docs.github.com/en/developers/apps/building-oauth-apps/scopes-for-oauth-apps/>.
 		`, "`"),
 		Example: heredoc.Doc(`
+			# Open a browser to add write:org and read:public_key scopes
 			$ gh auth refresh --scopes write:org,read:public_key
-			# => open a browser to add write:org and read:public_key scopes
 
+			# Open a browser to ensure your authentication credentials have the correct minimum scopes
 			$ gh auth refresh
-			# => open a browser to ensure your authentication credentials have the correct minimum scopes
 
+			# Open a browser to idempotently remove the delete_repo scope
 			$ gh auth refresh --remove-scopes delete_repo
-			# => open a browser to idempotently remove the delete_repo scope
 
+			# Open a browser to re-authenticate with the default minimum scopes
 			$ gh auth refresh --reset-scopes
-			# => open a browser to re-authenticate with the default minimum scopes
+
+			# Open a browser to re-authenticate and copy one-time OAuth code to clipboard
+			$ gh auth refresh --clipboard
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Interactive = opts.IO.CanPrompt()
@@ -93,7 +102,7 @@ func NewCmdRefresh(f *cmdutil.Factory, runF func(*RefreshOptions) error) *cobra.
 				return cmdutil.FlagErrorf("--hostname required when not running interactively")
 			}
 
-			opts.MainExecutable = f.Executable()
+			opts.MainExecutable = f.ExecutablePath
 			if runF != nil {
 				return runF(opts)
 			}
@@ -105,6 +114,7 @@ func NewCmdRefresh(f *cmdutil.Factory, runF func(*RefreshOptions) error) *cobra.
 	cmd.Flags().StringSliceVarP(&opts.Scopes, "scopes", "s", nil, "Additional authentication scopes for gh to have")
 	cmd.Flags().StringSliceVarP(&opts.RemoveScopes, "remove-scopes", "r", nil, "Authentication scopes to remove from gh")
 	cmd.Flags().BoolVar(&opts.ResetScopes, "reset-scopes", false, "Reset authentication scopes to the default minimum set of scopes")
+	cmdutil.NilBoolFlag(cmd, &opts.Clipboard, "clipboard", "c", "Copy one-time OAuth device code to clipboard")
 	// secure storage became the default on 2023/4/04; this flag is left as a no-op for backwards compatibility
 	var secureStorage bool
 	cmd.Flags().BoolVar(&secureStorage, "secure-storage", false, "Save authentication credentials in secure credential store")
@@ -116,11 +126,17 @@ func NewCmdRefresh(f *cmdutil.Factory, runF func(*RefreshOptions) error) *cobra.
 }
 
 func refreshRun(opts *RefreshOptions) error {
+	plainHTTPClient, err := opts.PlainHttpClient()
+	if err != nil {
+		return err
+	}
+
 	cfg, err := opts.Config()
 	if err != nil {
 		return err
 	}
 	authCfg := cfg.Authentication()
+	copyToClipboard := shared.ShouldCopyToClipboard(cfg, opts.Clipboard)
 
 	candidates := authCfg.Hosts()
 	if len(candidates) == 0 {
@@ -138,18 +154,8 @@ func refreshRun(opts *RefreshOptions) error {
 			}
 			hostname = candidates[selected]
 		}
-	} else {
-		var found bool
-		for _, c := range candidates {
-			if c == hostname {
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("not logged in to %s. use 'gh auth login' to authenticate with this host", hostname)
-		}
+	} else if !slices.Contains(candidates, hostname) {
+		return fmt.Errorf("not logged in to %s. use 'gh auth login' to authenticate with this host", hostname)
 	}
 
 	if src, writeable := shared.AuthTokenWriteable(authCfg, hostname); !writeable {
@@ -162,8 +168,8 @@ func refreshRun(opts *RefreshOptions) error {
 
 	if !opts.ResetScopes {
 		if oldToken, _ := authCfg.ActiveToken(hostname); oldToken != "" {
-			if oldScopes, err := shared.GetScopes(opts.HttpClient, hostname, oldToken); err == nil {
-				for _, s := range strings.Split(oldScopes, ",") {
+			if oldScopes, err := shared.GetScopes(plainHTTPClient, hostname, oldToken); err == nil {
+				for s := range strings.SplitSeq(oldScopes, ",") {
 					s = strings.TrimSpace(s)
 					if s != "" {
 						additionalScopes.Add(s)
@@ -195,7 +201,7 @@ func refreshRun(opts *RefreshOptions) error {
 
 	additionalScopes.RemoveValues(opts.RemoveScopes)
 
-	authedToken, authedUser, err := opts.AuthFlow(opts.IO, hostname, additionalScopes.ToSlice(), opts.Interactive)
+	authedToken, authedUser, err := opts.AuthFlow(plainHTTPClient, opts.IO, hostname, additionalScopes.ToSlice(), opts.Interactive, copyToClipboard)
 	if err != nil {
 		return err
 	}

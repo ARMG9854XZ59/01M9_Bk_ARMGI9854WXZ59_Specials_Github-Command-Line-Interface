@@ -20,7 +20,6 @@ import (
 	"github.com/cli/cli/v2/internal/codespaces/api"
 	"github.com/cli/cli/v2/internal/codespaces/portforwarder"
 	"github.com/cli/cli/v2/internal/codespaces/rpc"
-	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/ssh"
 	"github.com/cli/safeexec"
@@ -56,7 +55,7 @@ func newSSHCmd(app *App) *cobra.Command {
 		Long: heredoc.Docf(`
 			The %[1]sssh%[1]s command is used to SSH into a codespace. In its simplest form, you can
 			run %[1]sgh cs ssh%[1]s, select a codespace interactively, and connect.
-			
+
 			The %[1]sssh%[1]s command will automatically create a public/private ssh key pair in the
 			%[1]s~/.ssh%[1]s directory if you do not have an existing valid key pair. When selecting the
 			key pair to use, the preferred order is:
@@ -328,7 +327,7 @@ func selectSSHKeys(
 	opts sshOptions,
 ) (*ssh.KeyPair, bool, error) {
 	customConfigPath := ""
-	for i := 0; i < len(args); i += 1 {
+	for i := range args {
 		arg := args[i]
 
 		if arg == "-i" {
@@ -336,10 +335,20 @@ func selectSSHKeys(
 				return nil, false, errors.New("missing value to -i argument")
 			}
 
+			privateKeyPath := args[i+1]
+
+			// The --config setup will set the automatic key with -i, but it might not actually be created, so we need to ensure that here
+			if automaticPrivateKeyPath, _ := automaticPrivateKeyPath(sshContext); automaticPrivateKeyPath == privateKeyPath {
+				_, err := generateAutomaticSSHKeys(sshContext)
+				if err != nil {
+					return nil, false, fmt.Errorf("generating automatic keypair: %w", err)
+				}
+			}
+
 			// User manually specified an identity file so just trust it is correct
 			return &ssh.KeyPair{
-				PrivateKeyPath: args[i+1],
-				PublicKeyPath:  args[i+1] + ".pub",
+				PrivateKeyPath: privateKeyPath,
+				PublicKeyPath:  privateKeyPath + ".pub",
 			}, false, nil
 		}
 
@@ -489,8 +498,8 @@ func firstConfiguredKeyPair(
 		return nil, fmt.Errorf("could not load ssh configuration: %w", err)
 	}
 
-	configLines := strings.Split(string(configBytes), "\n")
-	for _, line := range configLines {
+	configLines := strings.SplitSeq(string(configBytes), "\n")
+	for line := range configLines {
 		line = strings.TrimSpace(line)
 
 		if strings.HasPrefix(line, "identityfile ") {
@@ -575,9 +584,8 @@ func (a *App) printOpenSSHConfig(ctx context.Context, opts sshOptions) (err erro
 			continue
 		}
 
-		cs := cs
 		wg.Add(1)
-		go func() {
+		go func(cs *api.Codespace) {
 			result := sshResult{}
 			defer wg.Done()
 
@@ -613,7 +621,7 @@ func (a *App) printOpenSSHConfig(ctx context.Context, opts sshOptions) (err erro
 
 			result.codespace = cs
 			sshUsers <- result
-		}()
+		}(cs)
 	}
 
 	go func() {
@@ -636,7 +644,8 @@ func (a *App) printOpenSSHConfig(ctx context.Context, opts sshOptions) (err erro
 		return fmt.Errorf("error formatting template: %w", err)
 	}
 
-	automaticIdentityFilePath, err := automaticPrivateKeyPath()
+	sshContext := ssh.Context{}
+	automaticIdentityFilePath, err := automaticPrivateKeyPath(sshContext)
 	if err != nil {
 		return fmt.Errorf("error finding .ssh directory: %w", err)
 	}
@@ -683,8 +692,8 @@ func (a *App) printOpenSSHConfig(ctx context.Context, opts sshOptions) (err erro
 	return status
 }
 
-func automaticPrivateKeyPath() (string, error) {
-	sshDir, err := config.HomeDirPath(".ssh")
+func automaticPrivateKeyPath(sshContext ssh.Context) (string, error) {
+	sshDir, err := sshContext.SshDir()
 	if err != nil {
 		return "", err
 	}
@@ -722,8 +731,8 @@ func newCpCmd(app *App) *cobra.Command {
 			be evaluated on the remote machine, subject to expansion of tildes, braces, globs,
 			environment variables, and backticks. For security, do not use this flag with arguments
 			provided by untrusted users; see <https://lwn.net/Articles/835962/> for discussion.
-			
-			By default, the %[1]scp%[1]s command will create a public/private ssh key pair to authenticate with 
+
+			By default, the %[1]scp%[1]s command will create a public/private ssh key pair to authenticate with
 			the codespace inside the %[1]s~/.ssh directory%[1]s.
 		`, "`"),
 		Example: heredoc.Doc(`
@@ -758,7 +767,7 @@ func (a *App) Copy(ctx context.Context, args []string, opts cpOptions) error {
 
 	hasRemote := false
 	for _, arg := range args {
-		if rest := strings.TrimPrefix(arg, "remote:"); rest != arg {
+		if rest, ok := strings.CutPrefix(arg, "remote:"); ok {
 			hasRemote = true
 			// scp treats each filename argument as a shell expression,
 			// subjecting it to expansion of environment variables, braces,
@@ -775,7 +784,7 @@ func (a *App) Copy(ctx context.Context, args []string, opts cpOptions) error {
 			// Escape it by prepending "./".
 			// TODO(adonovan): test on Windows, including with a c:\\foo path.
 			const sep = string(os.PathSeparator)
-			first := strings.Split(filepath.ToSlash(arg), sep)[0]
+			first, _, _ := strings.Cut(filepath.ToSlash(arg), sep)
 			if strings.Contains(first, ":") {
 				arg = "." + sep + arg
 			}

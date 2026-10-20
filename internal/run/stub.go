@@ -9,12 +9,12 @@ import (
 )
 
 const (
-	gitAuthRE = `-c credential.helper= -c credential.helper=!"[^"]+" auth git-credential `
+	gitAuthRE = `-c credential(?:\..+)?\.helper= -c credential(?:\..+)?\.helper=!"[^"]+" auth git-credential `
 )
 
 type T interface {
 	Helper()
-	Errorf(string, ...interface{})
+	Errorf(string, ...any)
 }
 
 // Stub installs a catch-all for all external commands invoked from gh. It returns a restore func that, when
@@ -46,7 +46,7 @@ func Stub() (*CommandStubber, func(T)) {
 			return
 		}
 		t.Helper()
-		t.Errorf("unmatched stubs (%d): %s", len(unmatched), strings.Join(unmatched, ", "))
+		t.Errorf("unmatched exec stubs (%d): %s", len(unmatched), strings.Join(unmatched, ", "))
 	}
 }
 

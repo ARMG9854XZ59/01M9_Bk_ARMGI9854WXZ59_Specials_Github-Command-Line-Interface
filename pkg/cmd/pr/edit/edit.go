@@ -1,17 +1,26 @@
 package edit
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/attachments"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/gh/ghtelemetry"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
 	shared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/shurcooL/githubv4"
+	"github.com/cli/cli/v2/pkg/set"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -25,17 +34,26 @@ type EditOptions struct {
 	Fetcher         EditableOptionsFetcher
 	EditorRetriever EditorRetriever
 	Prompter        shared.EditPrompter
+	Detector        fd.Detector
+	BaseRepo        func() (ghrepo.Interface, error)
 
 	SelectorArg string
 	Interactive bool
 
+	BodyDir     string
+	AttachFlag  *attachments.Flag
+	AttachEvent *attachments.TelemetryEvent
+	Assets      []attachments.UserAsset
+	Config      func() (gh.Config, error)
+
 	shared.Editable
 }
 
-func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Command {
+func NewCmdEdit(f *cmdutil.Factory, telemetry ghtelemetry.InvocationRecorder, runF func(*EditOptions) error) *cobra.Command {
 	opts := &EditOptions{
 		IO:              f.IOStreams,
 		HttpClient:      f.HttpClient,
+		Config:          f.Config,
 		Surveyor:        surveyor{P: f.Prompter},
 		Fetcher:         fetcher{},
 		EditorRetriever: editorRetriever{config: f.Config},
@@ -56,12 +74,64 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 
 			Editing a pull request's projects requires authorization with the %[1]sproject%[1]s scope.
 			To authorize, run %[1]sgh auth refresh -s project%[1]s.
+
+			Use %[1]s--attach%[1]s to upload an image or video. Without a body flag the pull
+			request keeps the body it already has and the attachment is appended to it. If the
+			body references an attached file, such as %[1]s![alt](./login.png)%[1]s, that reference
+			is rewritten to point at the uploaded asset instead. Paths in a %[1]s--body-file%[1]s are
+			relative to its directory, falling back to the working directory.
+			You can attach up to 50 files per command.
+
+			Alt text for an image follows the path after %[1]s#%[1]s, as in
+			%[1]s--attach './login.png#The login error state'%[1]s. Without it the filename is used.
+			A reference already in the body keeps the alt text written there. Video renders
+			as a player and has no alt text, so it cannot be given any.
+
+			If some attachments upload and others fail, the pull request is still updated with the
+			ones that succeeded. The command then exits with a non-zero status, but the pull
+			request's URL is still printed to stdout.
+
+			The %[1]s--add-assignee%[1]s and %[1]s--remove-assignee%[1]s flags both support
+			the following special values:
+			- %[1]s@me%[1]s: assign or unassign yourself
+			- %[1]s@copilot%[1]s: assign or unassign Copilot (not supported on GitHub Enterprise Server)
+
+			The %[1]s--add-reviewer%[1]s and %[1]s--remove-reviewer%[1]s flags support
+			the following special value:
+			- %[1]s@copilot%[1]s: request or remove review from Copilot (not supported on GitHub Enterprise Server)
 		`, "`"),
 		Example: heredoc.Doc(`
+			# Edit the title and body of a pull request
 			$ gh pr edit 23 --title "I found a bug" --body "Nothing works"
+
+			# Use a file as the body
+			$ gh pr edit 23 --body-file body.txt
+
+			# Append a screenshot to the body, with alt text after "#"
+			$ gh pr edit 23 --attach './login.png#The login error state'
+
+			# Append multiple files by repeating the flag
+			$ gh pr edit 23 --attach ./before.png --attach ./after.png
+
+			# Manage labels
 			$ gh pr edit 23 --add-label "bug,help wanted" --remove-label "core"
-			$ gh pr edit 23 --add-reviewer monalisa,hubot  --remove-reviewer myorg/team-name
+
+			# Manage reviewers
+			$ gh pr edit 23 --add-reviewer monalisa,hubot --remove-reviewer myorg/team-name
+
+			# Re-request review
+			$ gh pr edit 23 --add-reviewer monalisa
+
+			# Request a review from GitHub Copilot
+			$ gh pr edit 23 --add-reviewer "@copilot"
+
+			# Manage assignees
 			$ gh pr edit 23 --add-assignee "@me" --remove-assignee monalisa,hubot
+
+			# Assign GitHub Copilot
+			$ gh pr edit 23 --add-assignee "@copilot"
+
+			# Manage projects and milestones
 			$ gh pr edit 23 --add-project "Roadmap" --remove-project v1,v2
 			$ gh pr edit 23 --milestone "Version 1"
 			$ gh pr edit 23 --remove-milestone
@@ -70,8 +140,25 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Finder = shared.NewFinder(f)
 
+			// support `-R, --repo` override
+			opts.BaseRepo = f.BaseRepo
+
 			if len(args) > 0 {
 				opts.SelectorArg = args[0]
+			}
+
+			if opts.SelectorArg != "" {
+				// If a URL is provided, we need to parse it to override the
+				// base repository, especially the hostname part. That's because
+				// we need a feature detector down in this command, and that
+				// needs to know the API host. If the command is run outside of
+				// a git repo, we cannot instantiate the detector unless we have
+				// already parsed the URL.
+				if baseRepo, _, _, err := shared.ParseURL(opts.SelectorArg); err == nil {
+					opts.BaseRepo = func() (ghrepo.Interface, error) {
+						return baseRepo, nil
+					}
+				}
 			}
 
 			flags := cmd.Flags()
@@ -89,11 +176,11 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 			if bodyProvided || bodyFileProvided {
 				opts.Editable.Body.Edited = true
 				if bodyFileProvided {
-					b, err := cmdutil.ReadFile(bodyFile, opts.IO.In)
+					var err error
+					opts.Editable.Body.Value, opts.BodyDir, err = cmdutil.ReadMarkdownBodyFile(bodyFile, opts.IO.In)
 					if err != nil {
 						return err
 					}
-					opts.Editable.Body.Value = string(b)
 				}
 			}
 
@@ -135,12 +222,19 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 				// see the `Editable.MilestoneId` method.
 			}
 
-			if !opts.Editable.Dirty() {
+			var err error
+			opts.AttachEvent = attachments.BeginTelemetry(telemetry, cmd.CommandPath(), opts.AttachFlag.Count())
+			opts.Assets, err = opts.AttachFlag.UserAssets()
+			if err != nil {
+				return err
+			}
+
+			if !opts.Editable.Dirty() && len(opts.Assets) == 0 {
 				opts.Interactive = true
 			}
 
 			if opts.Interactive && !opts.IO.CanPrompt() {
-				return cmdutil.FlagErrorf("--tile, --body, --reviewer, --assignee, --label, --project, or --milestone required when not running interactively")
+				return cmdutil.FlagErrorf("--title, --body, --reviewer, --assignee, --label, --project, or --milestone required when not running interactively")
 			}
 
 			if runF != nil {
@@ -155,16 +249,17 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	cmd.Flags().StringVarP(&opts.Editable.Body.Value, "body", "b", "", "Set the new body.")
 	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file` (use \"-\" to read from standard input)")
 	cmd.Flags().StringVarP(&opts.Editable.Base.Value, "base", "B", "", "Change the base `branch` for this pull request")
-	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Add, "add-reviewer", nil, "Add reviewers by their `login`.")
-	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Remove, "remove-reviewer", nil, "Remove reviewers by their `login`.")
-	cmd.Flags().StringSliceVar(&opts.Editable.Assignees.Add, "add-assignee", nil, "Add assigned users by their `login`. Use \"@me\" to assign yourself.")
-	cmd.Flags().StringSliceVar(&opts.Editable.Assignees.Remove, "remove-assignee", nil, "Remove assigned users by their `login`. Use \"@me\" to unassign yourself.")
+	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Add, "add-reviewer", nil, "Add or re-request reviewers by their `login`. Use \"@copilot\" to request review from Copilot.")
+	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Remove, "remove-reviewer", nil, "Remove reviewers by their `login`. Use \"@copilot\" to remove review request from Copilot.")
+	cmd.Flags().StringSliceVar(&opts.Editable.Assignees.Add, "add-assignee", nil, "Add assigned users by their `login`. Use \"@me\" to assign yourself, or \"@copilot\" to assign Copilot.")
+	cmd.Flags().StringSliceVar(&opts.Editable.Assignees.Remove, "remove-assignee", nil, "Remove assigned users by their `login`. Use \"@me\" to unassign yourself, or \"@copilot\" to unassign Copilot.")
 	cmd.Flags().StringSliceVar(&opts.Editable.Labels.Add, "add-label", nil, "Add labels by `name`")
 	cmd.Flags().StringSliceVar(&opts.Editable.Labels.Remove, "remove-label", nil, "Remove labels by `name`")
 	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Add, "add-project", nil, "Add the pull request to projects by `title`")
 	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Remove, "remove-project", nil, "Remove the pull request from projects by `title`")
 	cmd.Flags().StringVarP(&opts.Editable.Milestone.Value, "milestone", "m", "", "Edit the milestone the pull request belongs to by `name`")
 	cmd.Flags().BoolVar(&removeMilestone, "remove-milestone", false, "Remove the milestone association from the pull request")
+	opts.AttachFlag = attachments.AddFlag(cmd)
 
 	_ = cmdutil.RegisterBranchCompletionFlags(f.GitClient, cmd, "base")
 
@@ -190,22 +285,80 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 }
 
 func editRun(opts *EditOptions) error {
+	httpClient, err := opts.HttpClient()
+	if err != nil {
+		return err
+	}
+
+	if opts.Detector == nil {
+		baseRepo, err := opts.BaseRepo()
+		if err != nil {
+			return err
+		}
+
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
+	}
+
 	findOptions := shared.FindOptions{
 		Selector: opts.SelectorArg,
-		Fields:   []string{"id", "url", "title", "body", "baseRefName", "reviewRequests", "assignees", "labels", "projectCards", "projectItems", "milestone"},
+		Fields:   []string{"id", "author", "url", "title", "body", "baseRefName", "reviewRequests", "labels", "projectCards", "projectItems", "milestone"},
+		Detector: opts.Detector,
 	}
+
+	if len(opts.Assets) > 0 {
+		findOptions.Fields = append(findOptions.Fields, "repository")
+	}
+
+	issueFeatures, err := opts.Detector.IssueFeatures()
+	if err != nil {
+		return err
+	}
+
+	// TODO ApiActorsSupported
+	if issueFeatures.ApiActorsSupported {
+		findOptions.Fields = append(findOptions.Fields, "assignedActors")
+	} else {
+		findOptions.Fields = append(findOptions.Fields, "assignees")
+	}
+
 	pr, repo, err := opts.Finder.Find(findOptions)
 	if err != nil {
 		return err
 	}
 
+	// Built before the prompts, so a run that cannot upload stops early.
+	var uploader *attachments.Uploader
+	if len(opts.Assets) > 0 {
+		cfg, err := opts.Config()
+		if err != nil {
+			return err
+		}
+		// A URL selector names its own host, so this can differ from the
+		// default host.
+		host := repo.RepoHost()
+		tokenType := cfg.Authentication().ActiveTokenType(host)
+		uploader, err = attachments.NewUploader(httpClient, tokenType, host, pr.RepositoryDatabaseID(), pr.RepositoryViewerPermission())
+		if err != nil {
+			return err
+		}
+	}
+
 	editable := opts.Editable
-	editable.Reviewers.Allowed = true
+	editable.Reviewers.Selectable = true
 	editable.Title.Default = pr.Title
 	editable.Body.Default = pr.Body
 	editable.Base.Default = pr.BaseRefName
-	editable.Reviewers.Default = pr.ReviewRequests.Logins()
-	editable.Assignees.Default = pr.Assignees.Logins()
+	editable.Reviewers.Default = pr.ReviewRequests.DisplayNames()
+	editable.Reviewers.DefaultLogins = pr.ReviewRequests.Logins()
+	// TODO ApiActorsSupported
+	if issueFeatures.ApiActorsSupported {
+		editable.ApiActorsSupported = true
+		editable.Assignees.Default = pr.AssignedActors.DisplayNames()
+		editable.Assignees.DefaultLogins = pr.AssignedActors.Logins()
+	} else {
+		editable.Assignees.Default = pr.Assignees.Logins()
+	}
 	editable.Labels.Default = pr.Labels.Names()
 	editable.Projects.Default = append(pr.ProjectCards.ProjectNames(), pr.ProjectItems.ProjectTitles()...)
 	projectItems := map[string]string{}
@@ -224,20 +377,34 @@ func editRun(opts *EditOptions) error {
 		}
 	}
 
-	httpClient, err := opts.HttpClient()
-	if err != nil {
-		return err
-	}
 	apiClient := api.NewClientFromHTTP(httpClient)
 
+	// Wire up search functions for assignees and reviewers.
+	// When these aren't wired up, it triggers a downstream fallback
+	// to legacy reviewer/assignee fetching.
+	// TODO ApiActorsSupported
+	if issueFeatures.ApiActorsSupported {
+		editable.AssigneeSearchFunc = shared.AssigneeSearchFunc(apiClient, repo, pr.ID)
+		editable.ReviewerSearchFunc = reviewerSearchFunc(apiClient, repo, &editable, pr.ID)
+	}
+
 	opts.IO.StartProgressIndicator()
-	err = opts.Fetcher.EditableOptionsFetch(apiClient, repo, &editable)
+	err = opts.Fetcher.EditableOptionsFetch(apiClient, repo, &editable, opts.Detector.ProjectsV1())
 	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return err
 	}
 
 	if opts.Interactive {
+		// Remove PR author from reviewer options;
+		// REST API errors if author is included (GraphQL silently ignores).
+		if editable.Reviewers.Edited {
+			s := set.NewStringSet()
+			s.AddValues(editable.Reviewers.Options)
+			s.Remove(pr.Author.Login)
+			editable.Reviewers.Options = s.ToSlice()
+		}
+
 		editorCommand, err := opts.EditorRetriever.Retrieve()
 		if err != nil {
 			return err
@@ -248,49 +415,180 @@ func editRun(opts *EditOptions) error {
 		}
 	}
 
+	var uploadErr error
+	if uploader != nil {
+		// A body the caller supplied replaces the pull request's, including an
+		// empty one.
+		body := editable.Body.Value
+		if !editable.Body.Edited {
+			body = editable.Body.Default
+		}
+
+		// Nothing that can prompt or cancel may follow this.
+		var uploadResult attachments.UploadResult
+		body, uploadResult, uploadErr = uploader.UploadAndAttach(context.Background(), body, opts.BodyDir, opts.Assets)
+		opts.AttachEvent.RecordOperations(uploadResult)
+
+		// With nothing uploaded, even a body the caller typed goes unwritten:
+		// its references are still local paths, which render broken. The other
+		// fields are innocent of the upload, so they proceed either way.
+		editable.Body.Edited = uploadResult.Uploaded > 0
+		if uploadResult.Uploaded > 0 {
+			editable.Body.Value = body
+		}
+
+		// The URL below is this command's success signal, so a run that writes
+		// nothing at all must not print it.
+		if !editable.Dirty() {
+			return errors.Join(uploadErr, errors.New("the pull request was not changed"))
+		}
+	}
+
 	opts.IO.StartProgressIndicator()
-	err = updatePullRequest(httpClient, repo, pr.ID, editable)
+	err = updatePullRequest(httpClient, repo, pr.ID, pr.Number, editable)
 	opts.IO.StopProgressIndicator()
 	if err != nil {
-		return err
+		// A failed write does not undo an upload, so both are reported.
+		return errors.Join(uploadErr, err)
 	}
 
 	fmt.Fprintln(opts.IO.Out, pr.URL)
 
-	return nil
+	return uploadErr
 }
 
-func updatePullRequest(httpClient *http.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
+// reviewerSearchFunc is intended to be an arg for MultiSelectWithSearch
+// to return potential reviewer candidates (users, bots, and teams).
+// It also updates the editable's metadata for later ID resolution.
+func reviewerSearchFunc(apiClient *api.Client, repo ghrepo.Interface, editable *shared.Editable, prID string) func(string) prompter.MultiSelectSearchResult {
+	searchFunc := func(input string) prompter.MultiSelectSearchResult {
+		candidates, moreResults, err := api.SuggestedReviewerActors(
+			apiClient,
+			repo,
+			prID,
+			input)
+		if err != nil {
+			return prompter.MultiSelectSearchResult{
+				Keys:        nil,
+				Labels:      nil,
+				MoreResults: 0,
+				Err:         err,
+			}
+		}
+
+		keys := make([]string, 0, len(candidates))
+		labels := make([]string, 0, len(candidates))
+
+		for _, c := range candidates {
+			keys = append(keys, c.Login())
+			labels = append(labels, c.DisplayName())
+
+			// Update the teams metadata in the editable struct
+			// so that updating the PR later can resolve the team ID.
+			if team, ok := c.(api.ReviewerTeam); ok {
+				editable.Metadata.Teams = append(editable.Metadata.Teams, api.OrgTeam{
+					ID:   "", // ID not needed for REST API reviewer mutations
+					Slug: team.Slug(),
+				})
+			}
+		}
+		return prompter.MultiSelectSearchResult{
+			Keys:        keys,
+			Labels:      labels,
+			MoreResults: moreResults,
+			Err:         nil,
+		}
+	}
+	return searchFunc
+}
+
+func updatePullRequest(httpClient *http.Client, repo ghrepo.Interface, id string, number int, editable shared.Editable) error {
 	var wg errgroup.Group
 	wg.Go(func() error {
 		return shared.UpdateIssue(httpClient, repo, id, true, editable)
 	})
 	if editable.Reviewers.Edited {
 		wg.Go(func() error {
-			return updatePullRequestReviews(httpClient, repo, id, editable)
+			return updatePullRequestReviews(httpClient, repo, id, number, editable)
 		})
 	}
 	return wg.Wait()
 }
 
-func updatePullRequestReviews(httpClient *http.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
-	userIds, teamIds, err := editable.ReviewerIds()
-	if err != nil {
-		return err
-	}
-	if (userIds == nil || len(*userIds) == 0) &&
-		(teamIds == nil || len(*teamIds) == 0) {
+func updatePullRequestReviews(httpClient *http.Client, repo ghrepo.Interface, prID string, number int, editable shared.Editable) error {
+	if !editable.Reviewers.Edited {
 		return nil
 	}
-	union := githubv4.Boolean(false)
-	reviewsRequestParams := githubv4.RequestReviewsInput{
-		PullRequestID: id,
-		Union:         &union,
-		UserIDs:       ghIds(userIds),
-		TeamIDs:       ghIds(teamIds),
-	}
+
 	client := api.NewClientFromHTTP(httpClient)
-	return api.UpdatePullRequestReviews(client, repo, reviewsRequestParams)
+
+	// Rebuild the Value slice from non-interactive flag input.
+	if len(editable.Reviewers.Add) != 0 || len(editable.Reviewers.Remove) != 0 {
+		add := editable.Reviewers.Add
+		remove := editable.Reviewers.Remove
+
+		// Replace @copilot with the Copilot reviewer login (only on github.com).
+		// Also use DefaultLogins (not Default display names) for computing the set.
+		var defaultLogins []string
+		// TODO ApiActorsSupported
+		if editable.ApiActorsSupported {
+			copilotReplacer := shared.NewCopilotReviewerReplacer()
+			add = copilotReplacer.ReplaceSlice(add)
+			remove = copilotReplacer.ReplaceSlice(remove)
+			defaultLogins = editable.Reviewers.DefaultLogins
+		} else {
+			// On GHES, Default already contains logins (no display name distinction)
+			defaultLogins = editable.Reviewers.Default
+		}
+
+		s := set.NewStringSet()
+		s.AddValues(add)
+		s.AddValues(defaultLogins)
+		s.RemoveValues(remove)
+		editable.Reviewers.Value = s.ToSlice()
+	}
+
+	// On github.com, use the new GraphQL mutation which supports bots.
+	// On GHES, fall back to REST API.
+	// TODO ApiActorsSupported
+	if editable.ApiActorsSupported {
+		return updatePullRequestReviewsGraphQL(client, repo, prID, editable)
+	}
+	return updatePullRequestReviewsREST(client, repo, number, editable)
+}
+
+// updatePullRequestReviewsGraphQL uses the RequestReviewsByLogin mutation.
+// This mutation replaces the entire reviewer set (union: false).
+func updatePullRequestReviewsGraphQL(client *api.Client, repo ghrepo.Interface, prID string, editable shared.Editable) error {
+	users, bots, teams := partitionReviewersByType(editable.Reviewers.Value)
+	return api.RequestReviewsByLogin(client, repo, prID, users, bots, teams, false)
+}
+
+// updatePullRequestReviewsREST uses the REST API to add/remove reviewers.
+// This is the legacy path for GHES compatibility.
+func updatePullRequestReviewsREST(client *api.Client, repo ghrepo.Interface, number int, editable shared.Editable) error {
+	addUsers, addBots, addTeams := partitionReviewersByType(editable.Reviewers.Value)
+	// REST API doesn't distinguish bots from users, so we need to combine them.
+	allAddUsers := append(addUsers, addBots...)
+
+	// Reviewers in Default but not in Value have been removed interactively.
+	var toRemove []string
+	for _, r := range editable.Reviewers.Default {
+		if !slices.Contains(editable.Reviewers.Value, r) {
+			toRemove = append(toRemove, r)
+		}
+	}
+	removeUsers, removeBots, removeTeams := partitionReviewersByType(toRemove)
+	allRemoveUsers := append(removeUsers, removeBots...)
+
+	wg := errgroup.Group{}
+	wg.Go(func() error {
+		return api.AddPullRequestReviews(client, repo, number, allAddUsers, addTeams)
+	})
+	wg.Go(func() error {
+		return api.RemovePullRequestReviews(client, repo, number, allRemoveUsers, removeTeams)
+	})
+	return wg.Wait()
 }
 
 type Surveyor interface {
@@ -311,13 +609,13 @@ func (s surveyor) EditFields(editable *shared.Editable, editorCmd string) error 
 }
 
 type EditableOptionsFetcher interface {
-	EditableOptionsFetch(*api.Client, ghrepo.Interface, *shared.Editable) error
+	EditableOptionsFetch(*api.Client, ghrepo.Interface, *shared.Editable, gh.ProjectsV1Support) error
 }
 
 type fetcher struct{}
 
-func (f fetcher) EditableOptionsFetch(client *api.Client, repo ghrepo.Interface, opts *shared.Editable) error {
-	return shared.FetchOptions(client, repo, opts)
+func (f fetcher) EditableOptionsFetch(client *api.Client, repo ghrepo.Interface, opts *shared.Editable, projectsV1Support gh.ProjectsV1Support) error {
+	return shared.FetchOptions(client, repo, opts, projectsV1Support)
 }
 
 type EditorRetriever interface {
@@ -332,13 +630,22 @@ func (e editorRetriever) Retrieve() (string, error) {
 	return cmdutil.DetermineEditor(e.config)
 }
 
-func ghIds(s *[]string) *[]githubv4.ID {
-	if s == nil {
-		return nil
+// partitionReviewersByType splits reviewer identifiers into users, bots, and teams.
+// Team identifiers are in the form "org/slug" and are returned as-is.
+// Bot logins (currently only Copilot) are identified and returned separately.
+func partitionReviewersByType(values []string) (users []string, bots []string, teams []string) {
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if strings.ContainsRune(v, '/') {
+			// Team: org/slug format, pass as-is
+			teams = append(teams, v)
+		} else if v == api.CopilotReviewerLogin {
+			bots = append(bots, v)
+		} else {
+			users = append(users, v)
+		}
 	}
-	ids := make([]githubv4.ID, len(*s))
-	for i, v := range *s {
-		ids[i] = v
-	}
-	return &ids
+	return
 }

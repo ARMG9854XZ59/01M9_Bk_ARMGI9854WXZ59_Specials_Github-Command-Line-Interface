@@ -1,0 +1,30 @@
+# requires-user-capability: false
+
+# Create a repository with a file so it has a default branch
+fixture-repo shared REPO
+env ISSUE_PREFIX=${SCRIPT_NAME}-${RANDOM_STRING}
+
+# Target the fixture repository
+env GH_REPO=$ORG/$REPO
+
+# Create the parent issue
+exec gh issue create --title $ISSUE_PREFIX-parent --body ''
+stdout2env PARENT_URL
+
+# Create a child via --parent on create
+exec gh issue create --title $ISSUE_PREFIX-child-via-create --body '' --parent $PARENT_URL
+stdout2env CHILD_URL
+
+# Confirm parent is set
+exec gh issue view $CHILD_URL --json parent --jq .parent.url
+stdout $PARENT_URL
+
+# Clear the parent with --remove-parent
+exec gh issue edit $CHILD_URL --remove-parent
+exec gh issue view $CHILD_URL --json parent --jq '.parent // "null"'
+stdout '^null$'
+
+# Set the parent back with --parent on edit
+exec gh issue edit $CHILD_URL --parent $PARENT_URL
+exec gh issue view $CHILD_URL --json parent --jq .parent.url
+stdout $PARENT_URL

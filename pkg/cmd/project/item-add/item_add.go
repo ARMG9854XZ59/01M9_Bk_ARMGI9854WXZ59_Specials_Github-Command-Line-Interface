@@ -40,8 +40,8 @@ func NewCmdAddItem(f *cmdutil.Factory, runF func(config addItemConfig) error) *c
 		Short: "Add a pull request or an issue to a project",
 		Use:   "item-add [<number>]",
 		Example: heredoc.Doc(`
-			# add an item to monalisa's project "1"
-			gh project item-add 1 --owner monalisa --url https://github.com/monalisa/myproject/issues/23
+			# Add an item to monalisa's project "1"
+			$ gh project item-add 1 --owner monalisa --url https://github.com/monalisa/myproject/issues/23
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -114,8 +114,8 @@ func runAddItem(config addItemConfig) error {
 
 }
 
-func addItemArgs(config addItemConfig) (*addProjectItemMutation, map[string]interface{}) {
-	return &addProjectItemMutation{}, map[string]interface{}{
+func addItemArgs(config addItemConfig) (*addProjectItemMutation, map[string]any) {
+	return &addProjectItemMutation{}, map[string]any{
 		"input": githubv4.AddProjectV2ItemByIdInput{
 			ProjectID: githubv4.ID(config.opts.projectID),
 			ContentID: githubv4.ID(config.opts.itemID),
@@ -124,10 +124,11 @@ func addItemArgs(config addItemConfig) (*addProjectItemMutation, map[string]inte
 }
 
 func printResults(config addItemConfig, item queries.ProjectItem) error {
-	if !config.io.IsStdoutTTY() {
-		return nil
+	if config.io.IsStdoutTTY() {
+		_, err := fmt.Fprintln(config.io.Out, "Added item")
+		return err
 	}
 
-	_, err := fmt.Fprintf(config.io.Out, "Added item\n")
+	_, err := fmt.Fprintln(config.io.Out, item.Id)
 	return err
 }

@@ -38,7 +38,7 @@ func NewCmdRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Comm
 	cmd := &cobra.Command{
 		Use:   "repos [<query>]",
 		Short: "Search for repositories",
-		Long: heredoc.Doc(`
+		Long: heredoc.Docf(`
 			Search for repositories on GitHub.
 
 			The command supports constructing queries using the GitHub search syntax,
@@ -46,27 +46,32 @@ func NewCmdRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Comm
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-for-repositories>
-		`),
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search repositories matching set of keywords "cli" and "shell"
+			# Search repositories matching set of keywords "cli" and "shell"
 			$ gh search repos cli shell
 
-			# search repositories matching phrase "vim plugin"
+			# Search repositories matching phrase "vim plugin"
 			$ gh search repos "vim plugin"
 
-			# search repositories public repos in the microsoft organization
+			# Search repositories using raw search qualifiers as separate arguments
+			$ gh search repos topic:github 'stars:>5000'
+
+			# Search repositories public repos in the microsoft organization
 			$ gh search repos --owner=microsoft --visibility=public
 
-			# search repositories with a set of topics
+			# Search repositories with a set of topics
 			$ gh search repos --topic=unix,terminal
 
-			# search repositories by coding language and number of good first issues
+			# Search repositories by coding language and number of good first issues
 			$ gh search repos --language=go --good-first-issues=">=10"
 
-			# search repositories without topic "linux"
+			# Search repositories without topic "linux"
 			$ gh search repos -- -topic:linux
 
-			# search repositories excluding archived repositories
+			# Search repositories excluding archived repositories
 			$ gh search repos --archived=false
 		`),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -171,14 +176,14 @@ func displayResults(io *iostreams.IOStreams, now time.Time, results search.Repos
 			tags = append(tags, "archived")
 		}
 		info := strings.Join(tags, ", ")
-		infoColor := cs.Gray
+		infoColor := cs.Muted
 		if repo.IsPrivate {
 			infoColor = cs.Yellow
 		}
 		tp.AddField(repo.FullName, tableprinter.WithColor(cs.Bold))
 		tp.AddField(text.RemoveExcessiveWhitespace(repo.Description))
 		tp.AddField(info, tableprinter.WithColor(infoColor))
-		tp.AddTimeField(now, repo.UpdatedAt, cs.Gray)
+		tp.AddTimeField(now, repo.UpdatedAt, cs.Muted)
 		tp.EndRow()
 	}
 	if io.IsStdoutTTY() {

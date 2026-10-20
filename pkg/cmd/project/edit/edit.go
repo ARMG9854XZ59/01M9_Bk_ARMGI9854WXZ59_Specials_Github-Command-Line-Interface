@@ -32,7 +32,7 @@ type editConfig struct {
 
 type updateProjectMutation struct {
 	UpdateProjectV2 struct {
-		ProjectV2 queries.Project `graphql:"projectV2"`
+		ProjectV2 queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"updateProjectV2(input:$input)"`
 }
 
@@ -45,8 +45,8 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(config editConfig) error) *cobra.C
 		Short: "Edit a project",
 		Use:   "edit [<number>]",
 		Example: heredoc.Doc(`
-			# edit the title of monalisa's project "1"
-			gh project edit 1 --owner monalisa --title "New title"
+			# Edit the title of monalisa's project "1"
+			$ gh project edit 1 --owner monalisa --title "New title"
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -116,16 +116,16 @@ func runEdit(config editConfig) error {
 	return printResults(config, query.UpdateProjectV2.ProjectV2)
 }
 
-func editArgs(config editConfig) (*updateProjectMutation, map[string]interface{}) {
+func editArgs(config editConfig) (*updateProjectMutation, map[string]any) {
 	variables := githubv4.UpdateProjectV2Input{ProjectID: githubv4.ID(config.opts.projectID)}
 	if config.opts.title != "" {
-		variables.Title = githubv4.NewString(githubv4.String(config.opts.title))
+		variables.Title = new(githubv4.String(config.opts.title))
 	}
 	if config.opts.shortDescription != "" {
-		variables.ShortDescription = githubv4.NewString(githubv4.String(config.opts.shortDescription))
+		variables.ShortDescription = new(githubv4.String(config.opts.shortDescription))
 	}
 	if config.opts.readme != "" {
-		variables.Readme = githubv4.NewString(githubv4.String(config.opts.readme))
+		variables.Readme = new(githubv4.String(config.opts.readme))
 	}
 	if config.opts.visibility != "" {
 		if config.opts.visibility == projectVisibilityPublic {
@@ -135,7 +135,7 @@ func editArgs(config editConfig) (*updateProjectMutation, map[string]interface{}
 		}
 	}
 
-	return &updateProjectMutation{}, map[string]interface{}{
+	return &updateProjectMutation{}, map[string]any{
 		"input":       variables,
 		"firstItems":  githubv4.Int(0),
 		"afterItems":  (*githubv4.String)(nil),
@@ -144,7 +144,7 @@ func editArgs(config editConfig) (*updateProjectMutation, map[string]interface{}
 	}
 }
 
-func printResults(config editConfig, project queries.Project) error {
+func printResults(config editConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

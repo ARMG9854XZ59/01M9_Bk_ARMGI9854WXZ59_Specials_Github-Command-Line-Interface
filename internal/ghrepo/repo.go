@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/cli/cli/v2/internal/ghinstance"
-	ghAuth "github.com/cli/go-gh/v2/pkg/auth"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/cli/go-gh/v2/pkg/repository"
 )
 
@@ -37,7 +37,7 @@ func FullName(r Interface) string {
 }
 
 func defaultHost() string {
-	host, _ := ghAuth.DefaultHost()
+	host, _ := ghauth.DefaultHost()
 	return host
 }
 
@@ -82,7 +82,7 @@ func IsSame(a, b Interface) bool {
 		normalizeHostname(a.RepoHost()) == normalizeHostname(b.RepoHost())
 }
 
-func GenerateRepoURL(repo Interface, p string, args ...interface{}) string {
+func GenerateRepoURL(repo Interface, p string, args ...any) string {
 	baseURL := fmt.Sprintf("%s%s/%s", ghinstance.HostPrefix(repo.RepoHost()), repo.RepoOwner(), repo.RepoName())
 	if p != "" {
 		if path := fmt.Sprintf(p, args...); path != "" {

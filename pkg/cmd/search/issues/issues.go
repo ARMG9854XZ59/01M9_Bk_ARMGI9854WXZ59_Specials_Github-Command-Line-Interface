@@ -15,6 +15,7 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 	var noAssignee, noLabel, noMilestone, noProject bool
 	var order, sort string
 	var appAuthor string
+	var searchType string
 	opts := &shared.IssuesOptions{
 		Browser: f.Browser,
 		Entity:  shared.Issues,
@@ -26,7 +27,9 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 	cmd := &cobra.Command{
 		Use:   "issues [<query>]",
 		Short: "Search for issues",
-		Long: heredoc.Doc(`
+		// TODO advancedIssueSearchCleanup
+		// Update the links and remove the mention at GHES 3.17 version.
+		Long: heredoc.Docf(`
 			Search for issues on GitHub.
 
 			The command supports constructing queries using the GitHub search syntax,
@@ -34,28 +37,52 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-issues-and-pull-requests>
-		`),
+
+			On supported GitHub hosts, advanced issue search syntax can be used in the
+			search query. Advanced search syntax, like boolean operators %[1]sOR%[1]s/%[1]sAND%[1]s,
+			and parentheses for nesting, must be passed as separate arguments, rather
+			than within a quoted multi-word string. This syntax is not supported with
+			%[1]s--web%[1]s. For more information about advanced issue search, see:
+			<https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests#building-advanced-filters-for-issues>
+
+			Use %[1]s--search-type%[1]s to select semantic or hybrid (keyword + semantic)
+			ranking instead of the default lexical search. Semantic and hybrid search are
+			scoped to issues, are relevance-ranked (so %[1]s--sort%[1]s and %[1]s--order%[1]s
+			cannot be used), return a single page of results, and are not available on
+			GitHub Enterprise Server.
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search issues matching set of keywords "readme" and "typo"
+			# Search issues matching set of keywords "readme" and "typo"
 			$ gh search issues readme typo
 
-			# search issues matching phrase "broken feature"
+			# Search issues matching phrase "broken feature"
 			$ gh search issues "broken feature"
 
-			# search issues and pull requests in cli organization
+			# Search issues using raw search qualifiers as separate arguments
+			$ gh search issues label:bug author:monalisa state:open
+
+			# Search issues and pull requests in cli organization
 			$ gh search issues --include-prs --owner=cli
 
-			# search open issues assigned to yourself
+			# Search open issues assigned to yourself
 			$ gh search issues --assignee=@me --state=open
 
-			# search issues with numerous comments
+			# Search issues with numerous comments
 			$ gh search issues --comments=">100"
 
-			# search issues without label "bug"
+			# Search issues without label "bug"
 			$ gh search issues -- -label:bug
 
-			# search issues only from un-archived repositories (default is all repositories)
+			# Search issues only from un-archived repositories (default is all repositories)
 			$ gh search issues --owner github --archived=false
+
+			# Search issues using semantic (natural-language) ranking
+			$ gh search issues "feature broken on web" --search-type semantic
+
+			# Search issues using hybrid (keyword + semantic) ranking
+			$ gh search issues "feature broken" --search-type hybrid
 		`),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && c.Flags().NFlag() == 0 {
@@ -67,12 +94,26 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 			if c.Flags().Changed("author") && c.Flags().Changed("app") {
 				return cmdutil.FlagErrorf("specify only `--author` or `--app`")
 			}
+			semanticSearch := searchType == "semantic" || searchType == "hybrid"
+			if semanticSearch && opts.WebMode {
+				return cmdutil.FlagErrorf("`--web` is not supported with %s search", searchType)
+			}
+			if semanticSearch && includePrs {
+				return cmdutil.FlagErrorf("%s search is scoped to issues and cannot be combined with `--include-prs`", searchType)
+			}
+			if semanticSearch && (c.Flags().Changed("sort") || c.Flags().Changed("order")) {
+				return cmdutil.FlagErrorf("`--sort` and `--order` are not supported with %s search", searchType)
+			}
 			if c.Flags().Changed("app") {
 				opts.Query.Qualifiers.Author = fmt.Sprintf("app/%s", appAuthor)
 			}
 			if includePrs {
 				opts.Entity = shared.Both
 				opts.Query.Qualifiers.Type = ""
+			}
+			if searchType != "lexical" {
+				// We don't submit `lexical` as search type as it's the default API behaviour.
+				opts.Query.IssueSearchType = searchType
 			}
 			if c.Flags().Changed("order") {
 				opts.Query.Order = order
@@ -134,12 +175,14 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 			"updated",
 		}, "Sort fetched results")
 
+	cmdutil.StringEnumFlag(cmd, &searchType, "search-type", "", "lexical", []string{"lexical", "semantic", "hybrid"}, "Type of issue search to perform")
+
 	// Query qualifier flags
 	cmd.Flags().BoolVar(&includePrs, "include-prs", false, "Include pull requests in results")
 	cmd.Flags().StringVar(&appAuthor, "app", "", "Filter by GitHub App author")
 	cmdutil.NilBoolFlag(cmd, &opts.Query.Qualifiers.Archived, "archived", "", "Filter based on the repository archived state {true|false}")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Assignee, "assignee", "", "Filter by assignee")
-	cmd.Flags().StringVar(&opts.Query.Qualifiers.Author, "author", "", "Filter by author")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Author, "author", "", "Filter by author (use --app to filter by a GitHub App)")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Closed, "closed", "", "Filter on closed at `date`")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Commenter, "commenter", "", "Filter based on comments by `user`")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Comments, "comments", "", "Filter on `number` of comments")
@@ -157,9 +200,9 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 	cmd.Flags().BoolVar(&noLabel, "no-label", false, "Filter on missing label")
 	cmd.Flags().BoolVar(&noMilestone, "no-milestone", false, "Filter on missing milestone")
 	cmd.Flags().BoolVar(&noProject, "no-project", false, "Filter on missing project")
-	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `number`")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `owner/number`")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Reactions, "reactions", "", "Filter on `number` of reactions")
-	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository")
+	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository, in `OWNER/REPO` format")
 	cmdutil.StringEnumFlag(cmd, &opts.Query.Qualifiers.State, "state", "", "", []string{"open", "closed"}, "Filter based on state")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Team, "team-mentions", "", "Filter based on team mentions")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Updated, "updated", "", "Filter on last updated at `date`")

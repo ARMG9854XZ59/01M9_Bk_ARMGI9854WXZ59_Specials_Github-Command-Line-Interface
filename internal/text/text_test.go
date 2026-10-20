@@ -1,6 +1,7 @@
 package text
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -144,5 +145,70 @@ func TestFormatSlice(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.wants, FormatSlice(tt.values, tt.lineLength, tt.indent, tt.prependWith, tt.appendWith, tt.sort))
 		})
+	}
+}
+
+func TestDisplayURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "simple",
+			url:  "https://github.com/cli/cli/issues/9470",
+			want: "https://github.com/cli/cli/issues/9470",
+		},
+		{
+			name: "without scheme",
+			url:  "github.com/cli/cli/issues/9470",
+			want: "https://github.com/cli/cli/issues/9470",
+		},
+		{
+			name: "with query param and anchor",
+			url:  "https://github.com/cli/cli/issues/9470?q=is:issue#issue-command",
+			want: "https://github.com/cli/cli/issues/9470",
+		},
+		{
+			name: "preserve http protocol use despite insecure",
+			url:  "http://github.com/cli/cli/issues/9470",
+			want: "http://github.com/cli/cli/issues/9470",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, DisplayURL(tt.url))
+		})
+	}
+}
+
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 B"},
+		{1, "1 B"},
+		{512, "512 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{2048, "2.0 KB"},
+		{10240, "10.0 KB"},
+		{524288, "512.0 KB"},
+		{1048576, "1.0 MB"},
+		{1572864, "1.5 MB"},
+		{5242880, "5.0 MB"},
+		{1073741824, "1.0 GB"},
+		{1610612736, "1.5 GB"},
+		{1099511627776, "1.0 TB"},
+		{1125899906842624, "1.0 PB"},
+		{1152921504606846976, "1024.0 PB"}, // 1 EB clamps to the largest known unit
+		{math.MaxInt64, "8192.0 PB"},       // maximum int never indexes past PB
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, FormatSize(tt.n))
 	}
 }

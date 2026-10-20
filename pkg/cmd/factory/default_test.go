@@ -11,6 +11,7 @@ import (
 	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/gh"
 	ghmock "github.com/cli/cli/v2/internal/gh/mock"
+	"github.com/cli/cli/v2/internal/telemetry"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
@@ -66,7 +67,6 @@ func Test_BaseRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := New("1")
 			rr := &remoteResolver{
 				readRemotes: func() (git.RemoteSet, error) {
 					return tt.remotes, nil
@@ -90,8 +90,10 @@ func Test_BaseRepo(t *testing.T) {
 					return cfg, nil
 				},
 			}
-			f.Remotes = rr.Resolver()
-			f.BaseRepo = BaseRepoFunc(f)
+			remotes := rr.Resolver()
+			f := &cmdutil.Factory{
+				BaseRepo: BaseRepoFunc(remotes),
+			}
 			repo, err := f.BaseRepo()
 			if tt.wantsErr {
 				assert.Error(t, err)
@@ -204,7 +206,7 @@ func Test_SmartBaseRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := New("1")
+			f := &cmdutil.Factory{}
 			rr := &remoteResolver{
 				readRemotes: func() (git.RemoteSet, error) {
 					return tt.remotes, nil
@@ -297,7 +299,6 @@ func Test_OverrideBaseRepo(t *testing.T) {
 			if tt.envOverride != "" {
 				t.Setenv("GH_REPO", tt.envOverride)
 			}
-			f := New("1")
 			rr := &remoteResolver{
 				readRemotes: func() (git.RemoteSet, error) {
 					return tt.remotes, nil
@@ -306,8 +307,10 @@ func Test_OverrideBaseRepo(t *testing.T) {
 					return tt.config, nil
 				},
 			}
-			f.Remotes = rr.Resolver()
-			f.BaseRepo = cmdutil.OverrideBaseRepoFunc(f, tt.argOverride)
+			remotes := rr.Resolver()
+			f := &cmdutil.Factory{
+				BaseRepo: cmdutil.OverrideBaseRepoFunc(BaseRepoFunc(remotes), tt.argOverride),
+			}
 			repo, err := f.BaseRepo()
 			if tt.wantsErr {
 				assert.Error(t, err)
@@ -317,117 +320,6 @@ func Test_OverrideBaseRepo(t *testing.T) {
 			assert.Equal(t, tt.wantsName, repo.RepoName())
 			assert.Equal(t, tt.wantsOwner, repo.RepoOwner())
 			assert.Equal(t, tt.wantsHost, repo.RepoHost())
-		})
-	}
-}
-
-func Test_ioStreams_pager(t *testing.T) {
-	tests := []struct {
-		name      string
-		env       map[string]string
-		config    gh.Config
-		wantPager string
-	}{
-		{
-			name: "GH_PAGER and PAGER set",
-			env: map[string]string{
-				"GH_PAGER": "GH_PAGER",
-				"PAGER":    "PAGER",
-			},
-			wantPager: "GH_PAGER",
-		},
-		{
-			name: "GH_PAGER and config pager set",
-			env: map[string]string{
-				"GH_PAGER": "GH_PAGER",
-			},
-			config:    pagerConfig(),
-			wantPager: "GH_PAGER",
-		},
-		{
-			name: "config pager and PAGER set",
-			env: map[string]string{
-				"PAGER": "PAGER",
-			},
-			config:    pagerConfig(),
-			wantPager: "CONFIG_PAGER",
-		},
-		{
-			name: "only PAGER set",
-			env: map[string]string{
-				"PAGER": "PAGER",
-			},
-			wantPager: "PAGER",
-		},
-		{
-			name: "GH_PAGER set to blank string",
-			env: map[string]string{
-				"GH_PAGER": "",
-				"PAGER":    "PAGER",
-			},
-			wantPager: "",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != nil {
-				for k, v := range tt.env {
-					t.Setenv(k, v)
-				}
-			}
-			f := New("1")
-			f.Config = func() (gh.Config, error) {
-				if tt.config == nil {
-					return config.NewBlankConfig(), nil
-				} else {
-					return tt.config, nil
-				}
-			}
-			io := ioStreams(f)
-			assert.Equal(t, tt.wantPager, io.GetPager())
-		})
-	}
-}
-
-func Test_ioStreams_prompt(t *testing.T) {
-	tests := []struct {
-		name           string
-		config         gh.Config
-		promptDisabled bool
-		env            map[string]string
-	}{
-		{
-			name:           "default config",
-			promptDisabled: false,
-		},
-		{
-			name:           "config with prompt disabled",
-			config:         disablePromptConfig(),
-			promptDisabled: true,
-		},
-		{
-			name:           "prompt disabled via GH_PROMPT_DISABLED env var",
-			env:            map[string]string{"GH_PROMPT_DISABLED": "1"},
-			promptDisabled: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != nil {
-				for k, v := range tt.env {
-					t.Setenv(k, v)
-				}
-			}
-			f := New("1")
-			f.Config = func() (gh.Config, error) {
-				if tt.config == nil {
-					return config.NewBlankConfig(), nil
-				} else {
-					return tt.config, nil
-				}
-			}
-			io := ioStreams(f)
-			assert.Equal(t, tt.promptDisabled, io.GetNeverPrompt())
 		})
 	}
 }
@@ -459,13 +351,9 @@ func TestSSOURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := New("1")
-			f.Config = func() (gh.Config, error) {
-				return config.NewBlankConfig(), nil
-			}
+			cfg := config.NewMockConfig()
 			ios, _, _, stderr := iostreams.Test()
-			f.IOStreams = ios
-			client, err := httpClientFunc(f, "v1.2.3")()
+			client, err := HttpClientFunc(func() (gh.Config, error) { return cfg, nil }, ios, "v1.2.3", "", &telemetry.NoOpService{})()
 			require.NoError(t, err)
 			req, err := http.NewRequest("GET", ts.URL, nil)
 			if tt.sso != "" {
@@ -486,6 +374,32 @@ func TestSSOURL(t *testing.T) {
 	}
 }
 
+func TestPlainHttpClient(t *testing.T) {
+	var receivedHeaders *http.Header
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = &r.Header
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	ios, _, _, _ := iostreams.Test()
+	client, err := plainHttpClientFunc(ios, "v1.2.3", "", &telemetry.NoOpService{})()
+	require.NoError(t, err)
+
+	req, err := http.NewRequest("GET", ts.URL, nil)
+	require.NoError(t, err)
+	res, err := client.Do(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, 204, res.StatusCode)
+	assert.Equal(t, []string{"GitHub CLI v1.2.3"}, receivedHeaders.Values("User-Agent"))
+	assert.Equal(t, []string{"2022-11-28"}, receivedHeaders.Values("X-GitHub-Api-Version"))
+	assert.Nil(t, receivedHeaders.Values("Authorization"))
+	assert.Nil(t, receivedHeaders.Values("Content-Type"))
+	assert.Nil(t, receivedHeaders.Values("Accept"))
+	assert.Nil(t, receivedHeaders.Values("Time-Zone"))
+}
+
 func TestNewGitClient(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -504,15 +418,15 @@ func TestNewGitClient(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := New("1")
+			f := &cmdutil.Factory{}
 			f.Config = func() (gh.Config, error) {
 				if tt.config == nil {
-					return config.NewBlankConfig(), nil
+					return config.NewMockConfig(), nil
 				} else {
 					return tt.config, nil
 				}
 			}
-			f.ExecutableName = tt.executable
+			f.ExecutablePath = tt.executable
 			ios, _, _, _ := iostreams.Test()
 			f.IOStreams = ios
 			c := newGitClient(f)
@@ -525,15 +439,7 @@ func TestNewGitClient(t *testing.T) {
 }
 
 func defaultConfig() *ghmock.ConfigMock {
-	cfg := config.NewFromString("")
+	cfg := config.NewMockConfigFromString("")
 	cfg.Set("nonsense.com", "oauth_token", "BLAH")
 	return cfg
-}
-
-func pagerConfig() gh.Config {
-	return config.NewFromString("pager: CONFIG_PAGER")
-}
-
-func disablePromptConfig() gh.Config {
-	return config.NewFromString("prompt: disabled")
 }

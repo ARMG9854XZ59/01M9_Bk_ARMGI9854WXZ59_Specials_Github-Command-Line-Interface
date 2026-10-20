@@ -3,6 +3,7 @@ package list
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/pkg/cmd/secret/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -23,8 +26,10 @@ type ListOptions struct {
 	IO         *iostreams.IOStreams
 	Config     func() (gh.Config, error)
 	BaseRepo   func() (ghrepo.Interface, error)
-	Now        func() time.Time
-	Exporter   cmdutil.Exporter
+	Prompter   prompter.Prompter
+
+	Now      func() time.Time
+	Exporter cmdutil.Exporter
 
 	OrgName     string
 	EnvName     string
@@ -48,6 +53,7 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 		Config:     f.Config,
 		HttpClient: f.HttpClient,
 		Now:        time.Now,
+		Prompter:   f.Prompter,
 	}
 
 	cmd := &cobra.Command{
@@ -55,16 +61,28 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 		Short: "List secrets",
 		Long: heredoc.Doc(`
 			List secrets on one of the following levels:
-			- repository (default): available to GitHub Actions runs or Dependabot in a repository
+			- repository (default): available to GitHub Actions runs, Agents sessions, or Dependabot in a repository
 			- environment: available to GitHub Actions runs for a deployment environment in a repository
-			- organization: available to GitHub Actions runs, Dependabot, or Codespaces within an organization
+			- organization: available to GitHub Actions runs, Agents sessions, Dependabot, or Codespaces within an organization
 			- user: available to Codespaces for your user
 		`),
 		Aliases: []string{"ls"},
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// support `-R, --repo` override
+			// If the user specified a repo directly, then we're using the OverrideBaseRepoFunc set by EnableRepoOverride
+			// So there's no reason to use the specialised BaseRepoFunc that requires remote disambiguation.
 			opts.BaseRepo = f.BaseRepo
+			isRepoUserProvided := cmd.Flags().Changed("repo") || os.Getenv("GH_REPO") != ""
+			if !isRepoUserProvided {
+				// If they haven't specified a repo directly, then we will wrap the BaseRepoFunc in one that errors if
+				// there might be multiple valid remotes.
+				opts.BaseRepo = shared.RequireNoAmbiguityBaseRepoFunc(opts.BaseRepo, f.Remotes)
+				// But if we are able to prompt, then we will wrap that up in a BaseRepoFunc that can prompt the user to
+				// resolve the ambiguity.
+				if opts.IO.CanPrompt() {
+					opts.BaseRepo = shared.PromptWhenAmbiguousBaseRepoFunc(opts.BaseRepo, f.IOStreams, f.Prompter)
+				}
+			}
 
 			if err := cmdutil.MutuallyExclusive("specify only one of `--org`, `--env`, or `--user`", opts.OrgName != "", opts.EnvName != "", opts.UserSecrets); err != nil {
 				return err
@@ -81,7 +99,7 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd.Flags().StringVarP(&opts.OrgName, "org", "o", "", "List secrets for an organization")
 	cmd.Flags().StringVarP(&opts.EnvName, "env", "e", "", "List secrets for an environment")
 	cmd.Flags().BoolVarP(&opts.UserSecrets, "user", "u", false, "List a secret for your user")
-	cmdutil.StringEnumFlag(cmd, &opts.Application, "app", "a", "", []string{shared.Actions, shared.Codespaces, shared.Dependabot}, "List secrets for a specific application")
+	cmdutil.StringEnumFlag(cmd, &opts.Application, "app", "a", "", []string{shared.Actions, shared.Agents, shared.Codespaces, shared.Dependabot}, "List secrets for a specific application")
 	cmdutil.AddJSONFlags(cmd, &opts.Exporter, secretFields)
 	return cmd
 }
@@ -210,7 +228,7 @@ type Secret struct {
 	NumSelectedRepos int               `json:"num_selected_repos"`
 }
 
-func (s *Secret) ExportData(fields []string) map[string]interface{} {
+func (s *Secret) ExportData(fields []string) map[string]any {
 	return cmdutil.StructExportData(s, fields)
 }
 
@@ -231,30 +249,50 @@ func fmtVisibility(s Secret) string {
 }
 
 func getOrgSecrets(client *http.Client, host, orgName string, showSelectedRepoInfo bool, app shared.App) ([]Secret, error) {
-	secrets, err := getSecrets(client, host, fmt.Sprintf("orgs/%s/%s/secrets", orgName, app))
+	u, err := safeurl.JoinPath("orgs", orgName, string(app), "secrets")
+	if err != nil {
+		return nil, err
+	}
+	secrets, err := getSecrets(client, host, u)
 	if err != nil {
 		return nil, err
 	}
 
 	if showSelectedRepoInfo {
-		err = populateSelectedRepositoryInformation(client, host, secrets)
-		if err != nil {
-			return nil, err
+		for i := range secrets {
+			if secrets[i].SelectedReposURL == "" {
+				continue
+			}
+			count, err := selectedRepositoryCount(client, host, safeurl.NewImmutableSafeURL(secrets[i].SelectedReposURL))
+			if err != nil {
+				return nil, fmt.Errorf("failed determining selected repositories for %s: %w", secrets[i].Name, err)
+			}
+			secrets[i].NumSelectedRepos = count
 		}
 	}
 	return secrets, nil
 }
 
 func getUserSecrets(client *http.Client, host string, showSelectedRepoInfo bool) ([]Secret, error) {
-	secrets, err := getSecrets(client, host, "user/codespaces/secrets")
+	u, err := safeurl.JoinPath("user", "codespaces", "secrets")
+	if err != nil {
+		return nil, err
+	}
+	secrets, err := getSecrets(client, host, u)
 	if err != nil {
 		return nil, err
 	}
 
 	if showSelectedRepoInfo {
-		err = populateSelectedRepositoryInformation(client, host, secrets)
-		if err != nil {
-			return nil, err
+		for i := range secrets {
+			if secrets[i].SelectedReposURL == "" {
+				continue
+			}
+			count, err := selectedRepositoryCount(client, host, safeurl.NewImmutableSafeURL(secrets[i].SelectedReposURL))
+			if err != nil {
+				return nil, fmt.Errorf("failed determining selected repositories for %s: %w", secrets[i].Name, err)
+			}
+			secrets[i].NumSelectedRepos = count
 		}
 	}
 
@@ -262,45 +300,47 @@ func getUserSecrets(client *http.Client, host string, showSelectedRepoInfo bool)
 }
 
 func getEnvSecrets(client *http.Client, repo ghrepo.Interface, envName string) ([]Secret, error) {
-	path := fmt.Sprintf("repos/%s/environments/%s/secrets", ghrepo.FullName(repo), envName)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "environments", envName, "secrets")
+	if err != nil {
+		return nil, err
+	}
 	return getSecrets(client, repo.RepoHost(), path)
 }
 
 func getRepoSecrets(client *http.Client, repo ghrepo.Interface, app shared.App) ([]Secret, error) {
-	return getSecrets(client, repo.RepoHost(), fmt.Sprintf("repos/%s/%s/secrets", ghrepo.FullName(repo), app))
+	u, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), string(app), "secrets")
+	if err != nil {
+		return nil, err
+	}
+	return getSecrets(client, repo.RepoHost(), u)
 }
 
-func getSecrets(client *http.Client, host, path string) ([]Secret, error) {
+func getSecrets(client *http.Client, host string, u *safeurl.MutableSafeURL) ([]Secret, error) {
 	var results []Secret
 	apiClient := api.NewClientFromHTTP(client)
-	path = fmt.Sprintf("%s?per_page=100", path)
-	for path != "" {
+	u.SetQuery("per_page", "100")
+	var pageURL safeurl.SafeURL = u
+	for pageURL.String() != "" {
 		response := struct {
 			Secrets []Secret
 		}{}
-		var err error
-		path, err = apiClient.RESTWithNext(host, "GET", path, nil, &response)
+		next, err := apiClient.RESTWithNext(host, "GET", pageURL.String(), nil, &response)
 		if err != nil {
 			return nil, err
 		}
+		pageURL = safeurl.NewImmutableSafeURL(next)
 		results = append(results, response.Secrets...)
 	}
 	return results, nil
 }
 
-func populateSelectedRepositoryInformation(client *http.Client, host string, secrets []Secret) error {
+func selectedRepositoryCount(client *http.Client, host string, selectedReposURL safeurl.SafeURL) (int, error) {
 	apiClient := api.NewClientFromHTTP(client)
-	for i, secret := range secrets {
-		if secret.SelectedReposURL == "" {
-			continue
-		}
-		response := struct {
-			TotalCount int `json:"total_count"`
-		}{}
-		if err := apiClient.REST(host, "GET", secret.SelectedReposURL, nil, &response); err != nil {
-			return fmt.Errorf("failed determining selected repositories for %s: %w", secret.Name, err)
-		}
-		secrets[i].NumSelectedRepos = response.TotalCount
+	response := struct {
+		TotalCount int `json:"total_count"`
+	}{}
+	if err := apiClient.REST(host, "GET", selectedReposURL.String(), nil, &response); err != nil {
+		return 0, err
 	}
-	return nil
+	return response.TotalCount, nil
 }

@@ -30,7 +30,8 @@ func explainer() string {
 		 - viewing and creating issues
 		 - viewing and creating releases
 		 - working with GitHub Actions
-		 - adding repository and environment secrets`)
+
+		### NOTE: gh does not use the default repository for managing repository and environment secrets.`)
 }
 
 type iprompter interface {
@@ -63,37 +64,49 @@ func NewCmdSetDefault(f *cmdutil.Factory, runF func(*SetDefaultOptions) error) *
 		Short: "Configure default repository for this directory",
 		Long:  explainer(),
 		Example: heredoc.Doc(`
-			Interactively select a default repository:
+			# Interactively select a default repository
 			$ gh repo set-default
 
-			Set a repository explicitly:
+			# Set a repository explicitly
 			$ gh repo set-default owner/repo
 
-			View the current default repository:
+			# Set a repository using a git remote name
+			$ gh repo set-default origin
+
+			# View the current default repository
 			$ gh repo set-default --view
 
-			Show more repository options in the interactive picker:
+			# Show more repository options in the interactive picker
 			$ git remote add newrepo https://github.com/owner/repo
 			$ gh repo set-default
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				var err error
-				opts.Repo, err = ghrepo.FromFullName(args[0])
-				if err != nil {
-					return err
-				}
-			}
-
-			if !opts.ViewMode && !opts.IO.CanPrompt() && opts.Repo == nil {
-				return cmdutil.FlagErrorf("repository required when not running interactively")
-			}
-
 			if isLocal, err := opts.GitClient.IsLocalGitRepo(cmd.Context()); err != nil {
 				return err
 			} else if !isLocal {
 				return errors.New("must be run from inside a git repository")
+			}
+
+			if len(args) > 0 {
+				var err error
+				opts.Repo, err = ghrepo.FromFullName(args[0])
+				if err != nil {
+					remotes, remoteErr := opts.Remotes()
+					if remoteErr != nil {
+						return remoteErr
+					}
+
+					remote, findErr := remotes.FindByName(args[0])
+					if findErr != nil {
+						return fmt.Errorf("given arg is not a valid repo or git remote: %w", err)
+					}
+					opts.Repo = remote.Repo
+				}
+			}
+
+			if !opts.ViewMode && !opts.UnsetMode && !opts.IO.CanPrompt() && opts.Repo == nil {
+				return cmdutil.FlagErrorf("repository required when not running interactively")
 			}
 
 			if runF != nil {
@@ -104,8 +117,8 @@ func NewCmdSetDefault(f *cmdutil.Factory, runF func(*SetDefaultOptions) error) *
 		},
 	}
 
-	cmd.Flags().BoolVarP(&opts.ViewMode, "view", "v", false, "view the current default repository")
-	cmd.Flags().BoolVarP(&opts.UnsetMode, "unset", "u", false, "unset the current default repository")
+	cmd.Flags().BoolVarP(&opts.ViewMode, "view", "v", false, "View the current default repository")
+	cmd.Flags().BoolVarP(&opts.UnsetMode, "unset", "u", false, "Unset the current default repository")
 
 	return cmd
 }
@@ -118,15 +131,18 @@ func setDefaultRun(opts *SetDefaultOptions) error {
 
 	currentDefaultRepo, _ := remotes.ResolvedRemote()
 
+	cs := opts.IO.ColorScheme()
+
 	if opts.ViewMode {
 		if currentDefaultRepo != nil {
 			fmt.Fprintln(opts.IO.Out, displayRemoteRepoName(currentDefaultRepo))
 		} else {
-			fmt.Fprintln(opts.IO.ErrOut, "no default repository has been set; use `gh repo set-default` to select one")
+			fmt.Fprintf(opts.IO.ErrOut,
+				"%s No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
+				cs.FailureIcon())
 		}
 		return nil
 	}
-	cs := opts.IO.ColorScheme()
 
 	if opts.UnsetMode {
 		var msg string

@@ -15,7 +15,7 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/ruleset/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	ghAuth "github.com/cli/go-gh/v2/pkg/auth"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +49,7 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 
 			If no ID is provided, an interactive prompt will be used to choose
 			the ruleset to view.
-			
+
 			Use the %[1]s--parents%[1]s flag to control whether rulesets configured at higher
 			levels that also apply to the provided repository or organization should
 			be returned. The default is %[1]strue%[1]s.
@@ -59,7 +59,7 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 			$ gh ruleset view
 
 			# Interactively choose a ruleset to view from only rulesets configured in the current repository
-			$ gh ruleset view --no-parents
+			$ gh ruleset view --parents=false
 
 			# View a ruleset configured in the current repository or any of its parents
 			$ gh ruleset view 43
@@ -124,7 +124,7 @@ func viewRun(opts *ViewOptions) error {
 		}
 	}
 
-	hostname, _ := ghAuth.DefaultHost()
+	hostname, _ := ghauth.DefaultHost()
 	cs := opts.IO.ColorScheme()
 
 	if opts.InteractiveMode {
@@ -150,7 +150,7 @@ func viewRun(opts *ViewOptions) error {
 		}
 
 		if rs != nil {
-			opts.ID = strconv.Itoa(rs.DatabaseId)
+			opts.ID = strconv.FormatInt(rs.DatabaseId, 10)
 
 			// can't get a ruleset lower in the chain than what was queried, so no need to handle repos here
 			if rs.Source.TypeName == "Organization" {
@@ -185,7 +185,7 @@ func viewRun(opts *ViewOptions) error {
 	}
 
 	fmt.Fprintf(w, "\n%s\n", cs.Bold(rs.Name))
-	fmt.Fprintf(w, "ID: %s\n", cs.Cyan(strconv.Itoa(rs.Id)))
+	fmt.Fprintf(w, "ID: %s\n", cs.Cyan(strconv.FormatInt(rs.Id, 10)))
 	fmt.Fprintf(w, "Source: %s (%s)\n", rs.Source, rs.SourceType)
 
 	fmt.Fprint(w, "Enforcement: ")
@@ -262,7 +262,7 @@ func selectRulesetID(rsList *shared.RulesetList, p prompter.Prompter, cs *iostre
 	for i, rs := range rsList.Rulesets {
 		s := fmt.Sprintf(
 			"%s: %s | %s | contains %s | configured in %s",
-			cs.Cyan(strconv.Itoa(rs.DatabaseId)),
+			cs.Cyan(strconv.FormatInt(rs.DatabaseId, 10)),
 			rs.Name,
 			strings.ToLower(rs.Enforcement),
 			text.Pluralize(rs.Rules.TotalCount, "rule"),

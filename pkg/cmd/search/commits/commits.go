@@ -37,7 +37,7 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 	cmd := &cobra.Command{
 		Use:   "commits [<query>]",
 		Short: "Search for commits",
-		Long: heredoc.Doc(`
+		Long: heredoc.Docf(`
 			Search for commits on GitHub.
 
 			The command supports constructing queries using the GitHub search syntax,
@@ -45,24 +45,29 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-commits>
-		`),
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search commits matching set of keywords "readme" and "typo"
+			# Search commits matching set of keywords "readme" and "typo"
 			$ gh search commits readme typo
 
-			# search commits matching phrase "bug fix"
+			# Search commits matching phrase "bug fix"
 			$ gh search commits "bug fix"
 
-			# search commits committed by user "monalisa"
+			# Search commits using raw search qualifiers as separate arguments
+			$ gh search commits fix author:monalisa merge:false
+
+			# Search commits committed by user "monalisa"
 			$ gh search commits --committer=monalisa
 
-			# search commits authored by users with name "Jane Doe"
+			# Search commits authored by users with name "Jane Doe"
 			$ gh search commits --author-name="Jane Doe"
 
-			# search commits matching hash "8dd03144ffdc6c0d486d6b705f9c7fba871ee7c3"
+			# Search commits matching hash "8dd03144ffdc6c0d486d6b705f9c7fba871ee7c3"
 			$ gh search commits --hash=8dd03144ffdc6c0d486d6b705f9c7fba871ee7c3
 
-			# search commits authored before February 1st, 2022
+			# Search commits authored before February 1st, 2022
 			$ gh search commits --author-date="<2022-02-01"
 		`),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -112,7 +117,7 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Hash, "hash", "", "Filter by commit hash")
 	cmdutil.NilBoolFlag(cmd, &opts.Query.Qualifiers.Merge, "merge", "", "Filter on merge commits")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Parent, "parent", "", "Filter by parent hash")
-	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository")
+	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository, in `OWNER/REPO` format")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Tree, "tree", "", "Filter by tree hash")
 	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.User, "owner", nil, "Filter on repository owner")
 	cmdutil.StringSliceEnumFlag(cmd, &opts.Query.Qualifiers.Is, "visibility", "", nil, []string{"public", "private", "internal"}, "Filter based on repository visibility")
@@ -161,7 +166,7 @@ func displayResults(io *iostreams.IOStreams, now time.Time, results search.Commi
 		tp.AddField(commit.Sha)
 		tp.AddField(text.RemoveExcessiveWhitespace(commit.Info.Message))
 		tp.AddField(commit.Author.Login)
-		tp.AddTimeField(now, commit.Info.Author.Date, cs.Gray)
+		tp.AddTimeField(now, commit.Info.Author.Date, cs.Muted)
 		tp.EndRow()
 	}
 	if io.IsStdoutTTY() {

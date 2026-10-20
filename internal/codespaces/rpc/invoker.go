@@ -7,7 +7,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -139,7 +141,7 @@ func connect(ctx context.Context, fwd portforwarder.PortForwarder) (Invoker, err
 	// Send initial connection heartbeat (no need to throw if we fail to get a response from the server)
 	_ = invoker.notifyCodespaceOfClientActivity(ctx, connectedEventName)
 
-	// Start the activity heatbeats
+	// Start the activity heartbeats
 	go invoker.heartbeat(pfctx, 1*time.Minute)
 
 	return invoker, nil
@@ -183,7 +185,11 @@ func (i *invoker) StartJupyterServer(ctx context.Context) (port int, serverUrl s
 		return 0, "", fmt.Errorf("failed to parse JupyterLab port: %w", err)
 	}
 
-	return port, response.ServerUrl, err
+	if !isJupyterServerURLValid(response.ServerUrl) {
+		return 0, "", fmt.Errorf("invalid JupyterLab server URL: %q", response.ServerUrl)
+	}
+
+	return port, response.ServerUrl, nil
 }
 
 // Rebuilds the container using cached layers by default or from scratch if full is true
@@ -241,6 +247,9 @@ func (i *invoker) StartSSHServerWithOptions(ctx context.Context, options StartSS
 		return 0, "", fmt.Errorf("failed to parse SSH server port: %w", err)
 	}
 
+	if !isUsernameValid(response.User) {
+		return 0, "", fmt.Errorf("invalid username: %s", response.User)
+	}
 	return port, response.User, nil
 }
 
@@ -299,4 +308,28 @@ func (i *invoker) notifyCodespaceOfClientActivity(ctx context.Context, activity 
 	}
 
 	return nil
+}
+
+func isUsernameValid(username string) bool {
+	// assuming valid usernames are alphanumeric, with these special characters allowed: . _ -
+	var validUsernamePattern = `^[a-zA-Z0-9_][-.a-zA-Z0-9_]*$`
+	re := regexp.MustCompile(validUsernamePattern)
+	return re.MatchString(username)
+}
+
+// Ensures that the Jupyter server URL is valid and points to a loopback http(s) URL
+func isJupyterServerURLValid(serverURL string) bool {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if strings.ToLower(host) == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

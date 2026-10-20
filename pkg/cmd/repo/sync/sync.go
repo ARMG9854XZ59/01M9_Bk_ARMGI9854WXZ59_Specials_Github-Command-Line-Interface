@@ -50,7 +50,7 @@ func NewCmdSync(f *cmdutil.Factory, runF func(*SyncOptions) error) *cobra.Comman
 			of the source repository to update the matching branch on the destination
 			repository so they are equal. A fast forward update will be used except when the
 			%[1]s--force%[1]s flag is specified, then the two branches will
-			by synced using a hard reset.
+			be synced using a hard reset.
 
 			Without an argument, the local repository is selected as the destination repository.
 
@@ -156,7 +156,7 @@ func syncLocalRepo(opts *SyncOptions) error {
 
 	if opts.IO.IsStdoutTTY() {
 		cs := opts.IO.ColorScheme()
-		fmt.Fprintf(opts.IO.Out, "%s Synced the \"%s\" branch from %s to local repository\n",
+		fmt.Fprintf(opts.IO.Out, "%s Synced the \"%s\" branch from \"%s\" to local repository\n",
 			cs.SuccessIcon(),
 			opts.Branch,
 			ghrepo.FullName(srcRepo))
@@ -203,8 +203,8 @@ func syncRemoteRepo(opts *SyncOptions) error {
 	if opts.IO.IsStdoutTTY() {
 		cs := opts.IO.ColorScheme()
 		branchName := opts.Branch
-		if idx := strings.Index(baseBranchLabel, ":"); idx >= 0 {
-			branchName = baseBranchLabel[idx+1:]
+		if _, after, ok := strings.Cut(baseBranchLabel, ":"); ok {
+			branchName = after
 		}
 		fmt.Fprintf(opts.IO.Out, "%s Synced the \"%s:%s\" branch from \"%s\"\n",
 			cs.SuccessIcon(),
@@ -259,6 +259,16 @@ func executeLocalRepoSync(srcRepo ghrepo.Interface, remote string, opts *SyncOpt
 	} else {
 		if hasLocalBranch {
 			if err := git.UpdateBranch(branch, "FETCH_HEAD"); err != nil {
+				worktrees, worktreeErr := git.Worktrees()
+				if worktreeErr != nil {
+					return fmt.Errorf("cannot update branch %q: %w; also cannot retrieve worktrees: %w", branch, err, worktreeErr)
+				}
+				if worktree := gitpkg.WorktreeForBranch(worktrees, branch); worktree != nil {
+					if worktree.Prunable {
+						return fmt.Errorf("can't sync %q because stale worktree metadata still associates it with %s\ntip: run `git worktree prune` and retry", branch, worktree.Path)
+					}
+					return fmt.Errorf("can't sync %q because it's checked out in another worktree at %s\ntip: run `gh repo sync` from that worktree instead", branch, worktree.Path)
+				}
 				return err
 			}
 		} else {
@@ -288,10 +298,9 @@ func executeRemoteRepoSync(client *api.Client, destRepo, srcRepo ghrepo.Interfac
 		}
 	}
 
-	var apiErr upstreamMergeErr
 	if baseBranch, err := triggerUpstreamMerge(client, destRepo, branchName); err == nil {
 		return baseBranch, nil
-	} else if !errors.As(err, &apiErr) {
+	} else if _, ok := errors.AsType[upstreamMergeErr](err); !ok {
 		return "", err
 	}
 
@@ -315,9 +324,8 @@ func executeRemoteRepoSync(client *api.Client, destRepo, srcRepo ghrepo.Interfac
 	// endpoint but unfortunately the API returns 422 for many reasons so we must
 	// interpret the message provide better error messaging for our users.
 	err = syncFork(client, destRepo, branchName, commit.Object.SHA, opts.Force)
-	var httpErr api.HTTPError
 	if err != nil {
-		if errors.As(err, &httpErr) {
+		if httpErr, ok := errors.AsType[api.HTTPError](err); ok {
 			switch httpErr.Message {
 			case notFastForwardErrorMessage:
 				return "", divergingError

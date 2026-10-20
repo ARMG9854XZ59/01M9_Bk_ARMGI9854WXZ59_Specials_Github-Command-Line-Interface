@@ -28,7 +28,7 @@ type deleteConfig struct {
 
 type deleteProjectMutation struct {
 	DeleteProject struct {
-		Project queries.Project `graphql:"projectV2"`
+		Project queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"deleteProjectV2(input:$input)"`
 }
 
@@ -38,8 +38,8 @@ func NewCmdDelete(f *cmdutil.Factory, runF func(config deleteConfig) error) *cob
 		Short: "Delete a project",
 		Use:   "delete [<number>]",
 		Example: heredoc.Doc(`
-			# delete the current user's project "1"
-			gh project delete 1 --owner "@me"
+			# Delete the current user's project "1"
+			$ gh project delete 1 --owner "@me"
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -103,8 +103,8 @@ func runDelete(config deleteConfig) error {
 
 }
 
-func deleteItemArgs(config deleteConfig) (*deleteProjectMutation, map[string]interface{}) {
-	return &deleteProjectMutation{}, map[string]interface{}{
+func deleteItemArgs(config deleteConfig) (*deleteProjectMutation, map[string]any) {
+	return &deleteProjectMutation{}, map[string]any{
 		"input": githubv4.DeleteProjectV2Input{
 			ProjectID: githubv4.ID(config.opts.projectID),
 		},
@@ -115,7 +115,7 @@ func deleteItemArgs(config deleteConfig) (*deleteProjectMutation, map[string]int
 	}
 }
 
-func printResults(config deleteConfig, project queries.Project) error {
+func printResults(config deleteConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

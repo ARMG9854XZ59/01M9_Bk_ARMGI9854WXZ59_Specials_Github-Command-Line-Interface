@@ -1,0 +1,27 @@
+# requires-user-capability: false
+
+# Create a repository to hold the autolink references
+fixture-repo shared REPO
+env AUTOLINK_PREFIX=T${RANDOM_STRING}-
+
+# Create an alphanumeric autolink
+exec gh repo autolink create --repo $ORG/$REPO $AUTOLINK_PREFIX 'https://example.com/TICKET?query=<num>'
+
+# Ensure the autolink was created
+exec gh repo autolink list --repo $ORG/$REPO --json=keyPrefix --jq='.[].keyPrefix'
+stdout $AUTOLINK_PREFIX
+
+# Get the autolink id
+exec gh repo autolink list --repo $ORG/$REPO --json=keyPrefix,id --jq='.[] | select(.keyPrefix == "'$AUTOLINK_PREFIX'") | .id'
+stdout2env AUTOLINK_ID
+
+# View the autolink and ensure the url template round tripped
+exec gh repo autolink view --repo $ORG/$REPO $AUTOLINK_ID --json=urlTemplate --jq='.urlTemplate'
+stdout 'https://example\.com/TICKET\?query=<num>'
+
+# Delete the autolink
+exec gh repo autolink delete --repo $ORG/$REPO $AUTOLINK_ID --yes
+
+# Ensure the autolink was deleted
+exec gh repo autolink list --repo $ORG/$REPO --json=id --jq='.[].id'
+! stdout $AUTOLINK_ID

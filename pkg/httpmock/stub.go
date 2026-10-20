@@ -9,15 +9,19 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/cli/go-gh/v2/pkg/api"
 )
 
 type Matcher func(req *http.Request) bool
 type Responder func(req *http.Request) (*http.Response, error)
 
 type Stub struct {
+	Stack     string
 	matched   bool
 	Matcher   Matcher
 	Responder Responder
+	exclude   bool
 }
 
 func MatchAny(*http.Request) bool {
@@ -57,7 +61,7 @@ func GraphQL(q string) Matcher {
 	}
 }
 
-func GraphQLMutationMatcher(q string, cb func(map[string]interface{}) bool) Matcher {
+func GraphQLMutationMatcher(q string, cb func(map[string]any) bool) Matcher {
 	re := regexp.MustCompile(q)
 
 	return func(req *http.Request) bool {
@@ -71,7 +75,7 @@ func GraphQLMutationMatcher(q string, cb func(map[string]interface{}) bool) Matc
 		var bodyData struct {
 			Query     string
 			Variables struct {
-				Input map[string]interface{}
+				Input map[string]any
 			}
 		}
 		_ = decodeJSONBody(req, &bodyData)
@@ -109,7 +113,7 @@ func readBody(req *http.Request) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-func decodeJSONBody(req *http.Request, dest interface{}) error {
+func decodeJSONBody(req *http.Request, dest any) error {
 	b, err := readBody(req)
 	if err != nil {
 		return err
@@ -120,6 +124,12 @@ func decodeJSONBody(req *http.Request, dest interface{}) error {
 func StringResponse(body string) Responder {
 	return func(req *http.Request) (*http.Response, error) {
 		return httpResponse(200, req, bytes.NewBufferString(body)), nil
+	}
+}
+
+func BinaryResponse(body []byte) Responder {
+	return func(req *http.Request) (*http.Response, error) {
+		return httpResponse(200, req, bytes.NewBuffer(body)), nil
 	}
 }
 
@@ -149,7 +159,7 @@ func StatusStringResponse(status int, body string) Responder {
 	}
 }
 
-func JSONResponse(body interface{}) Responder {
+func JSONResponse(body any) Responder {
 	return func(req *http.Request) (*http.Response, error) {
 		b, _ := json.Marshal(body)
 		header := http.Header{
@@ -159,7 +169,10 @@ func JSONResponse(body interface{}) Responder {
 	}
 }
 
-func StatusJSONResponse(status int, body interface{}) Responder {
+// StatusJSONResponse turns the given argument into a JSON response.
+//
+// The argument is not meant to be a JSON string, unless it's intentional.
+func StatusJSONResponse(status int, body any) Responder {
 	return func(req *http.Request) (*http.Response, error) {
 		b, _ := json.Marshal(body)
 		header := http.Header{
@@ -167,6 +180,12 @@ func StatusJSONResponse(status int, body interface{}) Responder {
 		}
 		return httpResponseWithHeader(status, req, bytes.NewBuffer(b), header), nil
 	}
+}
+
+// JSONErrorResponse is a type-safe helper to avoid confusion around the
+// provided argument.
+func JSONErrorResponse(status int, err api.HTTPError) Responder {
+	return StatusJSONResponse(status, err)
 }
 
 func FileResponse(filename string) Responder {
@@ -179,23 +198,27 @@ func FileResponse(filename string) Responder {
 	}
 }
 
-func RESTPayload(responseStatus int, responseBody string, cb func(payload map[string]interface{})) Responder {
+func RESTPayload(responseStatus int, responseBody string, cb func(payload map[string]any)) Responder {
 	return func(req *http.Request) (*http.Response, error) {
-		bodyData := make(map[string]interface{})
+		bodyData := make(map[string]any)
 		err := decodeJSONBody(req, &bodyData)
 		if err != nil {
 			return nil, err
 		}
 		cb(bodyData)
-		return httpResponse(responseStatus, req, bytes.NewBufferString(responseBody)), nil
+
+		header := http.Header{
+			"Content-Type": []string{"application/json"},
+		}
+		return httpResponseWithHeader(responseStatus, req, bytes.NewBufferString(responseBody), header), nil
 	}
 }
 
-func GraphQLMutation(body string, cb func(map[string]interface{})) Responder {
+func GraphQLMutation(body string, cb func(map[string]any)) Responder {
 	return func(req *http.Request) (*http.Response, error) {
 		var bodyData struct {
 			Variables struct {
-				Input map[string]interface{}
+				Input map[string]any
 			}
 		}
 		err := decodeJSONBody(req, &bodyData)
@@ -208,11 +231,11 @@ func GraphQLMutation(body string, cb func(map[string]interface{})) Responder {
 	}
 }
 
-func GraphQLQuery(body string, cb func(string, map[string]interface{})) Responder {
+func GraphQLQuery(body string, cb func(string, map[string]any)) Responder {
 	return func(req *http.Request) (*http.Response, error) {
 		var bodyData struct {
 			Query     string
-			Variables map[string]interface{}
+			Variables map[string]any
 		}
 		err := decodeJSONBody(req, &bodyData)
 		if err != nil {
@@ -224,10 +247,17 @@ func GraphQLQuery(body string, cb func(string, map[string]interface{})) Responde
 	}
 }
 
+// ScopesResponder returns a response with a 200 status code and the given OAuth scopes.
 func ScopesResponder(scopes string) func(*http.Request) (*http.Response, error) {
+	//nolint:bodyclose
+	return StatusScopesResponder(http.StatusOK, scopes)
+}
+
+// StatusScopesResponder returns a response with the given status code and OAuth scopes.
+func StatusScopesResponder(status int, scopes string) func(*http.Request) (*http.Response, error) {
 	return func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
-			StatusCode: 200,
+			StatusCode: status,
 			Request:    req,
 			Header: map[string][]string{
 				"X-Oauth-Scopes": {scopes},

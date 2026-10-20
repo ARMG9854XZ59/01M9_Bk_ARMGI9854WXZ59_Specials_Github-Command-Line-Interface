@@ -44,6 +44,10 @@ type CommentCreateInput struct {
 	SubjectId string
 }
 
+type CommentDeleteInput struct {
+	CommentId string
+}
+
 type CommentUpdateInput struct {
 	Body      string
 	CommentId string
@@ -60,7 +64,7 @@ func CommentCreate(client *Client, repoHost string, params CommentCreateInput) (
 		} `graphql:"addComment(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.AddCommentInput{
 			Body:      githubv4.String(params.Body),
 			SubjectID: githubv4.ID(params.SubjectId),
@@ -84,7 +88,7 @@ func CommentUpdate(client *Client, repoHost string, params CommentUpdateInput) (
 		} `graphql:"updateIssueComment(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.UpdateIssueCommentInput{
 			Body: githubv4.String(params.Body),
 			ID:   githubv4.ID(params.CommentId),
@@ -99,12 +103,33 @@ func CommentUpdate(client *Client, repoHost string, params CommentUpdateInput) (
 	return mutation.UpdateIssueComment.IssueComment.URL, nil
 }
 
+func CommentDelete(client *Client, repoHost string, params CommentDeleteInput) error {
+	var mutation struct {
+		DeleteIssueComment struct {
+			ClientMutationID string
+		} `graphql:"deleteIssueComment(input: $input)"`
+	}
+
+	variables := map[string]any{
+		"input": githubv4.DeleteIssueCommentInput{
+			ID: githubv4.ID(params.CommentId),
+		},
+	}
+
+	err := client.Mutate(repoHost, "CommentDelete", &mutation, variables)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c Comment) Identifier() string {
 	return c.ID
 }
 
 func (c Comment) AuthorLogin() string {
-	return c.Author.Login
+	return c.Author.DisplayName()
 }
 
 func (c Comment) Association() string {

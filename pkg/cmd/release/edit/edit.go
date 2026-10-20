@@ -43,10 +43,10 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 		Use:   "edit <tag>",
 		Short: "Edit a release",
 		Example: heredoc.Doc(`
-			Publish a release that was previously a draft
+			# Publish a release that was previously a draft
 			$ gh release edit v1.0 --draft=false
 
-			Update the release notes from the content of a file
+			# Update the release notes from the content of a file
 			$ gh release edit v1.0 --notes-file /path/to/release_notes.md
 		`),
 		Args: cobra.ExactArgs(1),
@@ -133,8 +133,8 @@ func editRun(tag string, opts *EditOptions) error {
 	return nil
 }
 
-func getParams(opts *EditOptions) map[string]interface{} {
-	params := map[string]interface{}{}
+func getParams(opts *EditOptions) map[string]any {
+	params := map[string]any{}
 
 	if opts.Body != nil {
 		params["body"] = opts.Body

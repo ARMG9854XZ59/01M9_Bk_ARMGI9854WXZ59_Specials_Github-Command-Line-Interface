@@ -20,7 +20,7 @@ type PinOptions struct {
 	Config      func() (gh.Config, error)
 	IO          *iostreams.IOStreams
 	BaseRepo    func() (ghrepo.Interface, error)
-	SelectorArg string
+	IssueNumber int
 }
 
 func NewCmdPin(f *cmdutil.Factory, runF func(*PinOptions) error) *cobra.Command {
@@ -33,7 +33,7 @@ func NewCmdPin(f *cmdutil.Factory, runF func(*PinOptions) error) *cobra.Command 
 
 	cmd := &cobra.Command{
 		Use:   "pin {<number> | <url>}",
-		Short: "Pin a issue",
+		Short: "Pin an issue",
 		Long: heredoc.Doc(`
 			Pin an issue to a repository.
 
@@ -51,8 +51,22 @@ func NewCmdPin(f *cmdutil.Factory, runF func(*PinOptions) error) *cobra.Command 
 		`),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts.BaseRepo = f.BaseRepo
-			opts.SelectorArg = args[0]
+			issueNumber, baseRepo, err := shared.ParseIssueFromArg(args[0])
+			if err != nil {
+				return err
+			}
+
+			// If the args provided the base repo then use that directly.
+			if baseRepo, present := baseRepo.Value(); present {
+				opts.BaseRepo = func() (ghrepo.Interface, error) {
+					return baseRepo, nil
+				}
+			} else {
+				// support `-R, --repo` override
+				opts.BaseRepo = f.BaseRepo
+			}
+
+			opts.IssueNumber = issueNumber
 
 			if runF != nil {
 				return runF(opts)
@@ -73,7 +87,12 @@ func pinRun(opts *PinOptions) error {
 		return err
 	}
 
-	issue, baseRepo, err := shared.IssueFromArgWithFields(httpClient, opts.BaseRepo, opts.SelectorArg, []string{"id", "number", "title", "isPinned"})
+	baseRepo, err := opts.BaseRepo()
+	if err != nil {
+		return err
+	}
+
+	issue, err := shared.FindIssueOrPR(httpClient, baseRepo, opts.IssueNumber, []string{"id", "number", "title", "isPinned"})
 	if err != nil {
 		return err
 	}
@@ -102,7 +121,7 @@ func pinIssue(httpClient *http.Client, repo ghrepo.Interface, issue *api.Issue) 
 		} `graphql:"pinIssue(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.PinIssueInput{
 			IssueID: issue.ID,
 		},

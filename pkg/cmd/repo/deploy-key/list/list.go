@@ -81,7 +81,7 @@ func listRun(opts *ListOptions) error {
 	now := time.Now()
 
 	for _, deployKey := range deployKeys {
-		sshID := strconv.Itoa(deployKey.ID)
+		sshID := strconv.FormatInt(deployKey.ID, 10)
 		t.AddField(sshID)
 		t.AddField(deployKey.Title)
 		sshType := "read-only"
@@ -90,7 +90,7 @@ func listRun(opts *ListOptions) error {
 		}
 		t.AddField(sshType)
 		t.AddField(deployKey.Key, tableprinter.WithTruncate(truncateMiddle))
-		t.AddTimeField(now, deployKey.CreatedAt, cs.Gray)
+		t.AddTimeField(now, deployKey.CreatedAt, cs.Muted)
 		t.EndRow()
 	}
 

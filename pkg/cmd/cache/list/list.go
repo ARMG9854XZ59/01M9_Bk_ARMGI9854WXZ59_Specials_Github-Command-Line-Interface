@@ -41,23 +41,23 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 		Use:   "list",
 		Short: "List GitHub Actions caches",
 		Example: heredoc.Doc(`
-		# List caches for current repository
-		$ gh cache list
+			# List caches for current repository
+			$ gh cache list
 
-		# List caches for specific repository
-		$ gh cache list --repo cli/cli
+			# List caches for specific repository
+			$ gh cache list --repo cli/cli
 
-		# List caches sorted by least recently accessed
-		$ gh cache list --sort last_accessed_at --order asc
+			# List caches sorted by least recently accessed
+			$ gh cache list --sort last_accessed_at --order asc
 
-		# List caches that have keys matching a prefix (or that match exactly)
-		$ gh cache list --key key-prefix
+			# List caches that have keys matching a prefix (or that match exactly)
+			$ gh cache list --key key-prefix
 
-		# To list caches for a specific branch, replace <branch-name> with the actual branch name
-		$ gh cache list --ref refs/heads/<branch-name>
+			# List caches for a specific branch, replace <branch-name> with the actual branch name
+			$ gh cache list --ref refs/heads/<branch-name>
 
-		# To list caches for a specific pull request, replace <pr-number> with the actual pull request number
-		$ gh cache list --ref refs/pull/<pr-number>/merge
+			# List caches for a specific pull request, replace <pr-number> with the actual pull request number
+			$ gh cache list --ref refs/pull/<pr-number>/merge
 		`),
 		Aliases: []string{"ls"},
 		Args:    cobra.NoArgs,
@@ -99,14 +99,15 @@ func listRun(opts *ListOptions) error {
 	}
 	client := api.NewClientFromHTTP(httpClient)
 
+	cs := opts.IO.ColorScheme()
 	opts.IO.StartProgressIndicator()
 	result, err := shared.GetCaches(client, repo, shared.GetCachesOptions{Limit: opts.Limit, Sort: opts.Sort, Order: opts.Order, Key: opts.Key, Ref: opts.Ref})
 	opts.IO.StopProgressIndicator()
 	if err != nil {
-		return fmt.Errorf("%s Failed to get caches: %w", opts.IO.ColorScheme().FailureIcon(), err)
+		return fmt.Errorf("%s Failed to get caches: %w", cs.FailureIcon(), err)
 	}
 
-	if len(result.ActionsCaches) == 0 {
+	if len(result.ActionsCaches) == 0 && opts.Exporter == nil {
 		return cmdutil.NewNoResultsError(fmt.Sprintf("No caches found in %s", ghrepo.FullName(repo)))
 	}
 
@@ -130,11 +131,11 @@ func listRun(opts *ListOptions) error {
 
 	tp := tableprinter.New(opts.IO, tableprinter.WithHeader("ID", "KEY", "SIZE", "CREATED", "ACCESSED"))
 	for _, cache := range result.ActionsCaches {
-		tp.AddField(opts.IO.ColorScheme().Cyan(fmt.Sprintf("%d", cache.Id)))
+		tp.AddField(cs.Cyanf("%d", cache.Id))
 		tp.AddField(cache.Key)
 		tp.AddField(humanFileSize(cache.SizeInBytes))
-		tp.AddTimeField(opts.Now, cache.CreatedAt, opts.IO.ColorScheme().Gray)
-		tp.AddTimeField(opts.Now, cache.LastAccessedAt, opts.IO.ColorScheme().Gray)
+		tp.AddTimeField(opts.Now, cache.CreatedAt, cs.Muted)
+		tp.AddTimeField(opts.Now, cache.LastAccessedAt, cs.Muted)
 		tp.EndRow()
 	}
 

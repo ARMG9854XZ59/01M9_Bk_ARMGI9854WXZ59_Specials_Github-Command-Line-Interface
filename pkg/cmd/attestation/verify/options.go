@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact/oci"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/io"
@@ -15,27 +16,34 @@ import (
 
 // Options captures the options for the verify command
 type Options struct {
-	ArtifactPath         string
-	BundlePath           string
-	Config               func() (gh.Config, error)
-	TrustedRoot          string
-	DenySelfHostedRunner bool
-	DigestAlgorithm      string
-	Limit                int
-	NoPublicGood         bool
-	OIDCIssuer           string
-	Owner                string
-	PredicateType        string
-	Repo                 string
-	SAN                  string
-	SANRegex             string
-	SignerRepo           string
-	SignerWorkflow       string
-	APIClient            api.Client
-	Logger               *io.Handler
-	OCIClient            oci.Client
-	SigstoreVerifier     verification.SigstoreVerifier
-	exporter             cmdutil.Exporter
+	ArtifactPath          string
+	BundlePath            string
+	UseBundleFromRegistry bool
+	Config                func() (gh.Config, error)
+	TrustedRoot           string
+	DenySelfHostedRunner  bool
+	DigestAlgorithm       string
+	Limit                 int
+	NoPublicGood          bool
+	OIDCIssuer            string
+	Owner                 string
+	PredicateType         string
+	Repo                  string
+	SAN                   string
+	SANRegex              string
+	SignerDigest          string
+	SignerRepo            string
+	SignerWorkflow        string
+	SourceDigest          string
+	SourceRef             string
+	APIClient             api.Client
+	Logger                *io.Handler
+	OCIClient             oci.Client
+	SigstoreVerifier      verification.SigstoreVerifier
+	exporter              cmdutil.Exporter
+	Hostname              string
+	// Tenant is only set when tenancy is used
+	Tenant string
 }
 
 // Clean cleans the file path option values
@@ -45,24 +53,10 @@ func (opts *Options) Clean() {
 	}
 }
 
-func (opts *Options) SetPolicyFlags() {
-	// check that Repo is in the expected format if provided
-	if opts.Repo != "" {
-		// we expect the repo argument to be in the format <OWNER>/<REPO>
-		splitRepo := strings.Split(opts.Repo, "/")
-
-		// if Repo is provided but owner is not, set the OWNER portion of the Repo value
-		// to Owner
-		opts.Owner = splitRepo[0]
-
-		if !isSignerIdentityProvided(opts) {
-			opts.SANRegex = expandToGitHubURL(opts.Repo)
-		}
-		return
-	}
-	if !isSignerIdentityProvided(opts) {
-		opts.SANRegex = expandToGitHubURL(opts.Owner)
-	}
+// FetchAttestationsFromGitHubAPI returns true if the command should fetch attestations from the GitHub API
+// It checks that a bundle path is not provided and that the "use bundle from registry" flag is not set
+func (opts *Options) FetchAttestationsFromGitHubAPI() bool {
+	return opts.BundlePath == "" && !opts.UseBundleFromRegistry
 }
 
 // AreFlagsValid checks that the provided flag combination is valid
@@ -83,12 +77,24 @@ func (opts *Options) AreFlagsValid() error {
 		return fmt.Errorf("limit %d not allowed, must be between 1 and 1000", opts.Limit)
 	}
 
-	return nil
-}
+	// Check that the bundle-from-oci flag is only used with OCI artifact paths
+	if opts.UseBundleFromRegistry && !strings.HasPrefix(opts.ArtifactPath, "oci://") {
+		return fmt.Errorf("bundle-from-oci flag can only be used with OCI artifact paths")
+	}
 
-// check if any of the signer identity flags have been provided
-func isSignerIdentityProvided(opts *Options) bool {
-	return opts.SAN != "" || opts.SANRegex != "" || opts.SignerRepo != "" || opts.SignerWorkflow != ""
+	// Check that both the bundle-from-oci and bundle-path flags are not used together
+	if opts.UseBundleFromRegistry && opts.BundlePath != "" {
+		return fmt.Errorf("bundle-from-oci flag cannot be used with bundle-path flag")
+	}
+
+	// Verify provided hostname
+	if opts.Hostname != "" {
+		if err := ghinstance.HostnameValidator(opts.Hostname); err != nil {
+			return fmt.Errorf("error parsing hostname: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func isProvidedRepoValid(repo string) bool {

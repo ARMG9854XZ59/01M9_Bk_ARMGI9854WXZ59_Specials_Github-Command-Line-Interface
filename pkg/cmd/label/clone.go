@@ -47,10 +47,10 @@ func newCmdClone(f *cmdutil.Factory, runF func(*cloneOptions) error) *cobra.Comm
 			destination repository using the %[1]s--force%[1]s flag.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# clone and overwrite labels from cli/cli repository into the current repository
+			# Clone and overwrite labels from cli/cli repository into the current repository
 			$ gh label clone cli/cli --force
 
-			# clone labels from cli/cli repository into a octocat/cli repository
+			# Clone labels from cli/cli repository into octocat/cli repository
 			$ gh label clone cli/cli --repo octocat/cli
 		`),
 		Args: cmdutil.ExactArgs(1, "cannot clone labels: source-repository argument required"),
@@ -120,7 +120,7 @@ func cloneLabels(client *http.Client, destination ghrepo.Interface, opts *cloneO
 	toCreate := make(chan createOptions)
 
 	wg, ctx := errgroup.WithContext(context.Background())
-	for i := 0; i < workers; i++ {
+	for range workers {
 		wg.Go(func() error {
 			for {
 				select {

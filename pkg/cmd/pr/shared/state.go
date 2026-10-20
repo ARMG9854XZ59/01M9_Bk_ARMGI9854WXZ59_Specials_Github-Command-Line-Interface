@@ -20,15 +20,24 @@ type IssueMetadataState struct {
 
 	Draft bool
 
+	// TODO ApiActorsSupported
+	// ApiActorsSupported indicates the host supports actor-based APIs (github.com, ghe.com).
+	// When true, mutations use logins directly instead of resolving node IDs.
+	// Remove this flag (and collapse to actor-only paths) once GHES supports
+	// replaceActorsForAssignable and requestReviewsByLogin mutations.
+	ApiActorsSupported bool
+
 	Body  string
 	Title string
 
-	Metadata   []string
-	Reviewers  []string
-	Assignees  []string
-	Labels     []string
-	Projects   []string
-	Milestones []string
+	Template string
+
+	Metadata      []string
+	Reviewers     []string
+	Assignees     []string
+	Labels        []string
+	ProjectTitles []string
+	Milestones    []string
 
 	MetadataResult *api.RepoMetadataResult
 
@@ -47,7 +56,7 @@ func (tb *IssueMetadataState) HasMetadata() bool {
 	return len(tb.Reviewers) > 0 ||
 		len(tb.Assignees) > 0 ||
 		len(tb.Labels) > 0 ||
-		len(tb.Projects) > 0 ||
+		len(tb.ProjectTitles) > 0 ||
 		len(tb.Milestones) > 0
 }
 

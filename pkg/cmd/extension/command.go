@@ -5,12 +5,14 @@ import (
 	"fmt"
 	gio "io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/git"
+	"github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
@@ -44,6 +46,13 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 
 			An extension cannot override any of the core gh commands. If an extension name conflicts
 			with a core gh command, you can use %[1]sgh extension exec <extname>%[1]s.
+
+			When an extension is executed, gh will check for new versions once every 24 hours and display
+			an upgrade notice. See %[1]sgh help environment%[1]s for information on disabling extension notices.
+
+			Extensions are not verified, signed, or endorsed by GitHub. When you install or upgrade
+  			an extension, you are trusting its publisher. It is your responsibility to review the
+  			source and provenance of any extension before use.
 
 			For the list of available extensions, see <https://github.com/topics/gh-extension>.
 		`, "`"),
@@ -160,7 +169,8 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 					query.Qualifiers = qualifiers
 
 					host, _ := cfg.Authentication().DefaultHost()
-					searcher := search.NewSearcher(client, host)
+					detector := featuredetection.NewDetector(client, host)
+					searcher := search.NewSearcher(client, host, detector)
 
 					if webMode {
 						url := searcher.URL(query)
@@ -292,19 +302,44 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 				Use:   "install <repository>",
 				Short: "Install a gh extension from a repository",
 				Long: heredoc.Docf(`
-					Install a GitHub repository locally as a GitHub CLI extension.
+					Install a GitHub CLI extension from a GitHub or local repository.
 
-					The repository argument can be specified in %[1]sOWNER/REPO%[1]s format as well as a full URL.
-					The URL format is useful when the repository is not hosted on github.com.
+					For GitHub repositories, the repository argument can be specified in
+					%[1]sOWNER/REPO%[1]s format or as a full repository URL.
+					The URL format is useful when the repository is not hosted on %[1]sgithub.com%[1]s.
 
-					To install an extension in development from the current directory, use %[1]s.%[1]s as the
-					value of the repository argument.
+					For remote repositories, the GitHub CLI first looks for the release artifacts assuming
+					that it's a binary extension i.e. prebuilt binaries provided as part of the release.
+					In the absence of a release, the repository itself is cloned assuming that it's a
+					script extension i.e. prebuilt executable or script exists on its root.
+
+					The %[1]s--pin%[1]s flag may be used to specify a tag or commit for binary and script
+					extensions respectively, the latest version is used otherwise.
+
+					For local repositories, often used while developing extensions, use %[1]s.%[1]s as the
+					value of the repository argument. Note the following:
+
+					- After installing an extension from a locally cloned repository, the GitHub CLI will
+					manage this extension as a symbolic link (or equivalent mechanism on Windows) pointing
+					to an executable file with the same name as the repository in the repository's root.
+					For example, if the repository is named %[1]sgh-foobar%[1]s, the symbolic link will point
+					to %[1]sgh-foobar%[1]s in the extension repository's root.
+					- When executing the extension, the GitHub CLI will run the executable file found
+					by following the symbolic link. If no executable file is found, the extension
+					will fail to execute.
+					- If the extension is precompiled, the executable file must be built manually and placed
+					in the repository's root.
 
 					For the list of available extensions, see <https://github.com/topics/gh-extension>.
 				`, "`"),
 				Example: heredoc.Doc(`
+					# Install an extension from a remote repository hosted on GitHub
 					$ gh extension install owner/gh-extension
-					$ gh extension install https://git.example.com/owner/gh-extension
+
+					# Install an extension from a remote repository via full URL
+					$ gh extension install https://my.ghes.com/owner/gh-extension
+
+					# Install an extension from a local repository in the current working directory
 					$ gh extension install .
 				`),
 				Args: cmdutil.MinimumArgs(1, "must specify a repository to install from"),
@@ -317,7 +352,20 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 						if err != nil {
 							return err
 						}
-						return m.InstallLocal(wd)
+						_, err = checkValidExtension(cmd.Root(), m, filepath.Base(wd), "")
+						if err != nil {
+							return err
+						}
+
+						err = m.InstallLocal(wd)
+						if ErrExtensionExecutableNotFound, ok := errors.AsType[*ErrExtensionExecutableNotFound](err); ok {
+							cs := io.ColorScheme()
+							if io.IsStdoutTTY() {
+								fmt.Fprintf(io.ErrOut, "%s %s", cs.WarningIcon(), ErrExtensionExecutableNotFound.Error())
+							}
+							return nil
+						}
+						return err
 					}
 
 					repo, err := ghrepo.FromFullName(args[0])
@@ -368,8 +416,9 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 					return nil
 				},
 			}
-			cmd.Flags().BoolVar(&forceFlag, "force", false, "force upgrade extension, or ignore if latest already installed")
-			cmd.Flags().StringVar(&pinFlag, "pin", "", "pin extension to a release tag or commit ref")
+			cmd.Flags().BoolVar(&forceFlag, "force", false, "Force upgrade extension, or ignore if latest already installed")
+			cmd.Flags().StringVar(&pinFlag, "pin", "", "Pin extension to a release tag or commit ref")
+			cmdutil.DisableAuthCheck(cmd)
 			return cmd
 		}(),
 		func() *cobra.Command {
@@ -408,9 +457,10 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 			return cmd
 		}(),
 		&cobra.Command{
-			Use:   "remove <name>",
-			Short: "Remove an installed extension",
-			Args:  cobra.ExactArgs(1),
+			Use:     "remove <name>",
+			Short:   "Remove an installed extension",
+			Aliases: []string{"uninstall"},
+			Args:    cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				extName := normalizeExtensionSelector(args[0])
 				if err := m.Remove(extName); err != nil {
@@ -432,7 +482,8 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 				Long: heredoc.Docf(`
 					This command will take over your terminal and run a fully interactive
 					interface for browsing, adding, and removing gh extensions. A terminal
-					width greater than 100 columns is recommended.
+					width greater than 100 columns is recommended. Narrow terminals
+					automatically use a single-column layout.
 
 					To learn how to control this interface, press %[1]s?%[1]s after running to see
 					the help text.
@@ -464,7 +515,8 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 						return err
 					}
 
-					searcher := search.NewSearcher(api.NewCachedHTTPClient(client, time.Hour*24), host)
+					detector := featuredetection.NewDetector(client, host)
+					searcher := search.NewSearcher(api.NewCachedHTTPClient(client, time.Hour*24), host, detector)
 
 					gc.Stderr = gio.Discard
 
@@ -483,7 +535,7 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 					return browse.ExtBrowse(opts)
 				},
 			}
-			cmd.Flags().BoolVar(&debug, "debug", false, "log to /tmp/extBrowse-*")
+			cmd.Flags().BoolVar(&debug, "debug", false, "Log to /tmp/extBrowse-*")
 			cmd.Flags().BoolVarP(&singleColumn, "single-column", "s", false, "Render TUI with only one column of text")
 			return cmd
 		}(),
@@ -499,7 +551,7 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 				of the extension.
 			`, "`"),
 			Example: heredoc.Doc(`
-				# execute a label extension instead of the core gh label command
+				# Execute a label extension instead of the core gh label command
 				$ gh extension exec label
 			`),
 			Args:               cobra.MinimumNArgs(1),
@@ -530,16 +582,16 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 				Short: "Create a new extension",
 				Example: heredoc.Doc(`
 					# Use interactively
-					gh extension create
+					$ gh extension create
 
 					# Create a script-based extension
-					gh extension create foobar
+					$ gh extension create foobar
 
 					# Create a Go extension
-					gh extension create --precompiled=go foobar
+					$ gh extension create --precompiled=go foobar
 
 					# Create a non-Go precompiled extension
-					gh extension create --precompiled=other foobar
+					$ gh extension create --precompiled=other foobar
 				`),
 				Args: cobra.MaximumNArgs(1),
 				RunE: func(cmd *cobra.Command, args []string) error {
@@ -641,7 +693,7 @@ func NewCmdExtension(f *cmdutil.Factory) *cobra.Command {
 
 func checkValidExtension(rootCmd *cobra.Command, m extensions.ExtensionManager, extName, extOwner string) (extensions.Extension, error) {
 	if !strings.HasPrefix(extName, "gh-") {
-		return nil, errors.New("extension repository name must start with `gh-`")
+		return nil, errors.New("extension name must start with `gh-`")
 	}
 
 	commandName := strings.TrimPrefix(extName, "gh-")
@@ -651,7 +703,7 @@ func checkValidExtension(rootCmd *cobra.Command, m extensions.ExtensionManager, 
 
 	for _, ext := range m.List() {
 		if ext.Name() == commandName {
-			if ext.Owner() == extOwner {
+			if extOwner != "" && ext.Owner() == extOwner {
 				return ext, alreadyInstalledError
 			}
 			return ext, fmt.Errorf("there is already an installed extension that provides the %q command", commandName)

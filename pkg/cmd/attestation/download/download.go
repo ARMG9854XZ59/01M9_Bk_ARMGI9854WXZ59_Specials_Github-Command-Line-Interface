@@ -9,8 +9,8 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact/oci"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/auth"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/io"
-	"github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 	"github.com/cli/cli/v2/pkg/cmdutil"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/spf13/cobra"
@@ -23,7 +23,7 @@ func NewDownloadCmd(f *cmdutil.Factory, runF func(*Options) error) *cobra.Comman
 		Args:  cmdutil.ExactArgs(1, "must specify file path or container image URI, as well as one of --owner or --repo"),
 		Short: "Download an artifact's attestations for offline use",
 		Long: heredoc.Docf(`
-			### NOTE: This feature is currently in beta, and subject to change.
+			### NOTE: This feature is currently in public preview, and subject to change.
 
 			Download attestations associated with an artifact for offline use.
 
@@ -46,6 +46,11 @@ func NewDownloadCmd(f *cmdutil.Factory, runF func(*Options) error) *cobra.Comman
 			Any associated bundle(s) will be written to a file in the
 			current directory named after the artifact's digest. For example, if the
 			digest is "sha256:1234", the file will be named "sha256:1234.jsonl".
+
+			Colons are special characters on Windows and cannot be used in
+			file names. To accommodate, a dash will be used to separate the algorithm
+			from the digest in the attestations file name. For example, if the digest
+			is "sha256:1234", the file will be named "sha256-1234.jsonl".
 		`, "`"),
 		Example: heredoc.Doc(`
 			# Download attestations for a local artifact linked with an organization
@@ -78,15 +83,22 @@ func NewDownloadCmd(f *cmdutil.Factory, runF func(*Options) error) *cobra.Comman
 			if err != nil {
 				return err
 			}
-			opts.APIClient = api.NewLiveClient(hc, opts.Logger)
 
-			opts.OCIClient = oci.NewLiveClient()
-
-			opts.Store = NewLiveStore("")
-
-			if err := auth.IsHostSupported(); err != nil {
+			externalClient, err := f.ExternalHttpClient()
+			if err != nil {
 				return err
 			}
+
+			if opts.Hostname == "" {
+				opts.Hostname, _ = ghauth.DefaultHost()
+			}
+			if err := auth.IsHostSupported(opts.Hostname); err != nil {
+				return err
+			}
+
+			opts.APIClient = api.NewLiveClient(hc, externalClient, opts.Hostname, opts.Logger)
+			opts.OCIClient = oci.NewLiveClient()
+			opts.Store = NewLiveStore("")
 
 			if runF != nil {
 				return runF(opts)
@@ -99,13 +111,14 @@ func NewDownloadCmd(f *cmdutil.Factory, runF func(*Options) error) *cobra.Comman
 		},
 	}
 
-	downloadCmd.Flags().StringVarP(&opts.Owner, "owner", "o", "", "a GitHub organization to scope attestation lookup by")
+	downloadCmd.Flags().StringVarP(&opts.Owner, "owner", "o", "", "GitHub organization to scope attestation lookup by")
 	downloadCmd.Flags().StringVarP(&opts.Repo, "repo", "R", "", "Repository name in the format <owner>/<repo>")
 	downloadCmd.MarkFlagsMutuallyExclusive("owner", "repo")
 	downloadCmd.MarkFlagsOneRequired("owner", "repo")
 	downloadCmd.Flags().StringVarP(&opts.PredicateType, "predicate-type", "", "", "Filter attestations by provided predicate type")
 	cmdutil.StringEnumFlag(downloadCmd, &opts.DigestAlgorithm, "digest-alg", "d", "sha256", []string{"sha256", "sha512"}, "The algorithm used to compute a digest of the artifact")
 	downloadCmd.Flags().IntVarP(&opts.Limit, "limit", "L", api.DefaultLimit, "Maximum number of attestations to fetch")
+	downloadCmd.Flags().StringVarP(&opts.Hostname, "hostname", "", "", "Configure host to use")
 
 	return downloadCmd
 }
@@ -118,16 +131,18 @@ func runDownload(opts *Options) error {
 
 	opts.Logger.VerbosePrintf("Downloading trusted metadata for artifact %s\n\n", opts.ArtifactPath)
 
-	c := verification.FetchAttestationsConfig{
-		APIClient: opts.APIClient,
-		Digest:    artifact.DigestWithAlg(),
-		Limit:     opts.Limit,
-		Owner:     opts.Owner,
-		Repo:      opts.Repo,
+	if opts.APIClient == nil {
+		return fmt.Errorf("no APIClient provided")
 	}
-	attestations, err := verification.GetRemoteAttestations(c)
+	params := api.FetchParams{
+		Digest: artifact.DigestWithAlg(),
+		Limit:  opts.Limit,
+		Owner:  opts.Owner,
+		Repo:   opts.Repo,
+	}
+	attestations, err := opts.APIClient.GetByDigest(params)
 	if err != nil {
-		if errors.Is(err, api.ErrNoAttestations{}) {
+		if errors.Is(err, api.ErrNoAttestationsFound) {
 			fmt.Fprintf(opts.Logger.IO.Out, "No attestations found for %s\n", opts.ArtifactPath)
 			return nil
 		}
@@ -136,10 +151,9 @@ func runDownload(opts *Options) error {
 
 	// Apply predicate type filter to returned attestations
 	if opts.PredicateType != "" {
-		filteredAttestations := verification.FilterAttestations(opts.PredicateType, attestations)
-
-		if len(filteredAttestations) == 0 {
-			return fmt.Errorf("no attestations found with predicate type: %s", opts.PredicateType)
+		filteredAttestations, err := api.FilterAttestations(opts.PredicateType, attestations)
+		if err != nil {
+			return fmt.Errorf("failed to filter attestations: %v", err)
 		}
 
 		attestations = filteredAttestations

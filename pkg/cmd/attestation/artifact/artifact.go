@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
+
 	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact/oci"
 )
 
@@ -22,6 +24,7 @@ type DigestedArtifact struct {
 	URL       string
 	digest    string
 	digestAlg string
+	nameRef   name.Reference
 }
 
 func normalizeReference(reference string, pathSeparator rune) (normalized string, artifactType artifactType, err error) {
@@ -51,6 +54,13 @@ func normalizeReference(reference string, pathSeparator rune) (normalized string
 	return filepath.Clean(reference), fileArtifactType, nil
 }
 
+func NewDigestedArtifactForRelease(digest string, digestAlg string) (artifact *DigestedArtifact) {
+	return &DigestedArtifact{
+		digest:    digest,
+		digestAlg: digestAlg,
+	}
+}
+
 func NewDigestedArtifact(client oci.Client, reference, digestAlg string) (artifact *DigestedArtifact, err error) {
 	normalized, artifactType, err := normalizeReference(reference, os.PathSeparator)
 	if err != nil {
@@ -76,4 +86,8 @@ func (a *DigestedArtifact) Algorithm() string {
 // DigestWithAlg returns the digest:algorithm of the artifact
 func (a *DigestedArtifact) DigestWithAlg() string {
 	return fmt.Sprintf("%s:%s", a.digestAlg, a.digest)
+}
+
+func (a *DigestedArtifact) NameRef() name.Reference {
+	return a.nameRef
 }

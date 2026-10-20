@@ -8,16 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/briandowns/spinner"
+	"github.com/cli/go-gh/v2/pkg/asciisanitizer"
 	ghTerm "github.com/cli/go-gh/v2/pkg/term"
 	"github.com/cli/safeexec"
 	"github.com/google/shlex"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
+	"golang.org/x/text/transform"
 )
 
 const DefaultWidth = 80
@@ -53,11 +56,21 @@ type IOStreams struct {
 	Out    fileWriter
 	ErrOut fileWriter
 
+	// ContentOut is the writer for external content (HTTP response bodies,
+	// gist files, etc.) where the application is not the author of the bytes.
+	// By default it sanitizes ANSI escape sequences before they reach the
+	// underlying stdout. SetContentSanitization toggles the sanitization at
+	// the command layer (e.g. via an --allow-escape-sequences flag).
+	ContentOut io.Writer
+
+	sanitizeContent bool
+
 	terminalTheme string
 
 	progressIndicatorEnabled bool
 	progressIndicator        *spinner.Spinner
 	progressIndicatorMu      sync.Mutex
+	spinnerDisabled          bool
 
 	alternateScreenBufferEnabled bool
 	alternateScreenBufferActive  bool
@@ -70,13 +83,17 @@ type IOStreams struct {
 	stderrTTYOverride bool
 	stderrIsTTY       bool
 
-	colorOverride bool
-	colorEnabled  bool
+	colorOverride           bool
+	colorEnabled            bool
+	colorLabels             bool
+	accessibleColorsEnabled bool
 
 	pagerCommand string
 	pagerProcess *os.Process
 
-	neverPrompt bool
+	neverPrompt                 bool
+	accessiblePrompterEnabled   bool
+	experimentalPrompterEnabled bool
 
 	TempFileOverride *os.File
 }
@@ -100,6 +117,10 @@ func (s *IOStreams) HasTrueColor() bool {
 		return s.colorEnabled
 	}
 	return s.term.IsTrueColorSupported()
+}
+
+func (s *IOStreams) ColorLabels() bool {
+	return s.colorLabels
 }
 
 // DetectTerminalTheme is a utility to call before starting the output pager so that the terminal background
@@ -132,6 +153,10 @@ func (s *IOStreams) TerminalTheme() string {
 func (s *IOStreams) SetColorEnabled(colorEnabled bool) {
 	s.colorOverride = true
 	s.colorEnabled = colorEnabled
+}
+
+func (s *IOStreams) SetColorLabels(colorLabels bool) {
+	s.colorLabels = colorLabels
 }
 
 func (s *IOStreams) SetStdinTTY(isTTY bool) {
@@ -200,8 +225,8 @@ func (s *IOStreams) StartPager() error {
 	}
 
 	pagerEnv := os.Environ()
-	for i := len(pagerEnv) - 1; i >= 0; i-- {
-		if strings.HasPrefix(pagerEnv[i], "PAGER=") {
+	for i, p := range slices.Backward(pagerEnv) {
+		if strings.HasPrefix(p, "PAGER=") {
 			pagerEnv = append(pagerEnv[0:i], pagerEnv[i+1:]...)
 		}
 	}
@@ -228,6 +253,7 @@ func (s *IOStreams) StartPager() error {
 		fd:          s.Out.Fd(),
 		WriteCloser: &pagerWriter{pagedOut},
 	}
+	s.ContentOut = newContentWriter(s.Out, s.sanitizeContent)
 	err = pagerCmd.Start()
 	if err != nil {
 		return err
@@ -263,12 +289,29 @@ func (s *IOStreams) SetNeverPrompt(v bool) {
 	s.neverPrompt = v
 }
 
+func (s *IOStreams) GetSpinnerDisabled() bool {
+	return s.spinnerDisabled
+}
+
+func (s *IOStreams) SetSpinnerDisabled(v bool) {
+	s.spinnerDisabled = v
+}
+
 func (s *IOStreams) StartProgressIndicator() {
 	s.StartProgressIndicatorWithLabel("")
 }
 
 func (s *IOStreams) StartProgressIndicatorWithLabel(label string) {
 	if !s.progressIndicatorEnabled {
+		return
+	}
+
+	if s.spinnerDisabled {
+		// If the spinner is disabled, simply print a
+		// textual progress indicator and return.
+		// This means that s.ProgressIndicator will be nil.
+		// See also: the comment on StopProgressIndicator()
+		s.startTextualProgressIndicator(label)
 		return
 	}
 
@@ -285,8 +328,10 @@ func (s *IOStreams) StartProgressIndicatorWithLabel(label string) {
 	}
 
 	// https://github.com/briandowns/spinner#available-character-sets
-	dotStyle := spinner.CharSets[11]
-	sp := spinner.New(dotStyle, 120*time.Millisecond, spinner.WithWriter(s.ErrOut), spinner.WithColor("fgCyan"))
+	// ⣾ ⣷ ⣽ ⣻ ⡿
+	spinnerStyle := spinner.CharSets[11]
+
+	sp := spinner.New(spinnerStyle, 120*time.Millisecond, spinner.WithWriter(s.ErrOut), spinner.WithColor("fgCyan"))
 	if label != "" {
 		sp.Prefix = label + " "
 	}
@@ -295,6 +340,27 @@ func (s *IOStreams) StartProgressIndicatorWithLabel(label string) {
 	s.progressIndicator = sp
 }
 
+func (s *IOStreams) startTextualProgressIndicator(label string) {
+	s.progressIndicatorMu.Lock()
+	defer s.progressIndicatorMu.Unlock()
+
+	// Default label when spinner disabled is "Working..."
+	if label == "" {
+		label = "Working..."
+	}
+
+	// Add an ellipsis to the label if it doesn't already have one.
+	ellipsis := "..."
+	if !strings.HasSuffix(label, ellipsis) {
+		label = label + ellipsis
+	}
+
+	fmt.Fprintf(s.ErrOut, "%s%s", s.ColorScheme().Cyan(label), "\n")
+}
+
+// StopProgressIndicator stops the progress indicator if it is running.
+// Note that a textual progress indicator does not create a progress indicator,
+// so this method is a no-op in that case.
 func (s *IOStreams) StopProgressIndicator() {
 	s.progressIndicatorMu.Lock()
 	defer s.progressIndicatorMu.Unlock()
@@ -366,7 +432,14 @@ func (s *IOStreams) TerminalWidth() int {
 }
 
 func (s *IOStreams) ColorScheme() *ColorScheme {
-	return NewColorScheme(s.ColorEnabled(), s.ColorSupport256(), s.HasTrueColor())
+	return &ColorScheme{
+		Enabled:       s.ColorEnabled(),
+		EightBitColor: s.ColorSupport256(),
+		TrueColor:     s.HasTrueColor(),
+		Accessible:    s.AccessibleColorsEnabled(),
+		ColorLabels:   s.ColorLabels(),
+		Theme:         s.TerminalTheme(),
+	}
 }
 
 func (s *IOStreams) ReadUserFile(fn string) ([]byte, error) {
@@ -389,6 +462,50 @@ func (s *IOStreams) TempFile(dir, pattern string) (*os.File, error) {
 		return s.TempFileOverride, nil
 	}
 	return os.CreateTemp(dir, pattern)
+}
+
+func (s *IOStreams) SetAccessibleColorsEnabled(enabled bool) {
+	s.accessibleColorsEnabled = enabled
+}
+
+func (s *IOStreams) AccessibleColorsEnabled() bool {
+	return s.accessibleColorsEnabled
+}
+
+func (s *IOStreams) SetAccessiblePrompterEnabled(enabled bool) {
+	s.accessiblePrompterEnabled = enabled
+}
+
+func (s *IOStreams) AccessiblePrompterEnabled() bool {
+	return s.accessiblePrompterEnabled
+}
+
+func (s *IOStreams) SetExperimentalPrompterEnabled(enabled bool) {
+	s.experimentalPrompterEnabled = enabled
+}
+
+func (s *IOStreams) ExperimentalPrompterEnabled() bool {
+	return s.experimentalPrompterEnabled
+}
+
+// SetContentSanitization toggles ANSI escape sanitization on ContentOut.
+// Commands should call this with false when an explicit opt-out flag (e.g.
+// --allow-escape-sequences) is set, so subsequent writes of external content
+// pass through unmodified.
+func (s *IOStreams) SetContentSanitization(enabled bool) {
+	s.sanitizeContent = enabled
+	s.ContentOut = newContentWriter(s.Out, enabled)
+}
+
+// newContentWriter returns the writer to wire up as ContentOut. When
+// sanitize is true it inserts an asciisanitizer in front of the underlying
+// writer; otherwise it returns the underlying writer directly so writes
+// reach stdout unchanged.
+func newContentWriter(out io.Writer, sanitize bool) io.Writer {
+	if !sanitize {
+		return out
+	}
+	return transform.NewWriter(out, &asciisanitizer.Sanitizer{})
 }
 
 func System() *IOStreams {
@@ -417,12 +534,14 @@ func System() *IOStreams {
 	}
 
 	io := &IOStreams{
-		In:           os.Stdin,
-		Out:          stdout,
-		ErrOut:       stderr,
-		pagerCommand: os.Getenv("PAGER"),
-		term:         &terminal,
+		In:              os.Stdin,
+		Out:             stdout,
+		ErrOut:          stderr,
+		pagerCommand:    os.Getenv("PAGER"),
+		term:            &terminal,
+		sanitizeContent: true,
 	}
+	io.ContentOut = newContentWriter(io.Out, io.sanitizeContent)
 
 	stdoutIsTTY := io.IsStdoutTTY()
 	stderrIsTTY := io.IsStderrTTY()
@@ -473,10 +592,12 @@ func Test() (*IOStreams, *bytes.Buffer, *bytes.Buffer, *bytes.Buffer) {
 			fd:         0,
 			ReadCloser: io.NopCloser(in),
 		},
-		Out:    &fdWriter{fd: 1, Writer: out},
-		ErrOut: &fdWriter{fd: 2, Writer: errOut},
-		term:   &fakeTerm{},
+		Out:             &fdWriter{fd: 1, Writer: out},
+		ErrOut:          &fdWriter{fd: 2, Writer: errOut},
+		term:            &fakeTerm{},
+		sanitizeContent: true,
 	}
+	io.ContentOut = newContentWriter(io.Out, io.sanitizeContent)
 	io.SetStdinTTY(false)
 	io.SetStdoutTTY(false)
 	io.SetStderrTTY(false)
@@ -524,7 +645,7 @@ func (w *fdWriteCloser) Fd() uintptr {
 	return w.fd
 }
 
-// fdWriter represents a wrapped stdin ReadCloser that preserves the original file descriptor
+// fdReader represents a wrapped stdin ReadCloser that preserves the original file descriptor
 type fdReader struct {
 	io.ReadCloser
 	fd uintptr

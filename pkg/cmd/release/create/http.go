@@ -2,18 +2,21 @@ package create
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/cmd/release/shared"
 	"github.com/shurcooL/githubv4"
+
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 )
 
 type tag struct {
@@ -27,6 +30,14 @@ type releaseNotes struct {
 
 var notImplementedError = errors.New("not implemented")
 
+type errMissingRequiredWorkflowScope struct {
+	Hostname string
+}
+
+func (e errMissingRequiredWorkflowScope) Error() string {
+	return "workflow scope may be required"
+}
+
 func remoteTagExists(httpClient *http.Client, repo ghrepo.Interface, tagName string) (bool, error) {
 	gql := api.NewClientFromHTTP(httpClient)
 	qualifiedTagName := fmt.Sprintf("refs/tags/%s", tagName)
@@ -37,7 +48,7 @@ func remoteTagExists(httpClient *http.Client, repo ghrepo.Interface, tagName str
 			} `graphql:"ref(qualifiedName: $tagName)"`
 		} `graphql:"repository(owner: $owner, name: $name)"`
 	}
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner":   githubv4.String(repo.RepoOwner()),
 		"name":    githubv4.String(repo.RepoName()),
 		"tagName": githubv4.String(qualifiedTagName),
@@ -47,38 +58,22 @@ func remoteTagExists(httpClient *http.Client, repo ghrepo.Interface, tagName str
 }
 
 func getTags(httpClient *http.Client, repo ghrepo.Interface, limit int) ([]tag, error) {
-	path := fmt.Sprintf("repos/%s/%s/tags?per_page=%d", repo.RepoOwner(), repo.RepoName(), limit)
-	url := ghinstance.RESTPrefix(repo.RepoHost()) + path
-	req, err := http.NewRequest("GET", url, nil)
+	u, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "tags")
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	if !success {
-		return nil, api.HandleHTTPError(resp)
-	}
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+	u.SetQuery("per_page", strconv.Itoa(limit))
 
 	var tags []tag
-	err = json.Unmarshal(b, &tags)
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	err = api.NewClientFromHTTP(httpClient).REST(repo.RepoHost(), http.MethodGet, u.String(), nil, &tags)
 	return tags, err
 }
 
 func generateReleaseNotes(httpClient *http.Client, repo ghrepo.Interface, tagName, target, previousTagName string) (*releaseNotes, error) {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"tag_name": tagName,
 	}
 	if target != "" {
@@ -93,104 +88,99 @@ func generateReleaseNotes(httpClient *http.Client, repo ghrepo.Interface, tagNam
 		return nil, err
 	}
 
-	path := fmt.Sprintf("repos/%s/%s/releases/generate-notes", repo.RepoOwner(), repo.RepoName())
-	url := ghinstance.RESTPrefix(repo.RepoHost()) + path
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
-		return nil, notImplementedError
-	}
-
-	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	if !success {
-		return nil, api.HandleHTTPError(resp)
-	}
-
-	b, err := io.ReadAll(resp.Body)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases", "generate-notes")
 	if err != nil {
 		return nil, err
 	}
 
 	var rn releaseNotes
-	err = json.Unmarshal(b, &rn)
-	return &rn, err
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	err = api.NewClientFromHTTP(httpClient).REST(repo.RepoHost(), http.MethodPost, path.String(), bytes.NewBuffer(bodyBytes), &rn)
+	if err != nil {
+		if httpErr, ok := errors.AsType[api.HTTPError](err); ok && httpErr.StatusCode == http.StatusNotFound {
+			return nil, notImplementedError
+		}
+		return nil, err
+	}
+	return &rn, nil
 }
 
 func publishedReleaseExists(httpClient *http.Client, repo ghrepo.Interface, tagName string) (bool, error) {
-	path := fmt.Sprintf("repos/%s/%s/releases/tags/%s", repo.RepoOwner(), repo.RepoName(), url.PathEscape(tagName))
-	url := ghinstance.RESTPrefix(repo.RepoHost()) + path
-	req, err := http.NewRequest("HEAD", url, nil)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases", "tags", tagName)
 	if err != nil {
 		return false, err
 	}
 
-	resp, err := httpClient.Do(req)
+	// A HEAD response has no body, so Request is used rather than REST, which would try to
+	// decode one.
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	resp, err := api.NewClientFromHTTP(httpClient).Request(repo.RepoHost(), http.MethodHead, path.String(), nil)
 	if err != nil {
+		var httpErr api.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	if resp.Body != nil {
 		defer resp.Body.Close()
 	}
 
-	if resp.StatusCode == 200 {
-		return true, nil
-	} else if resp.StatusCode == 404 {
-		return false, nil
-	} else {
-		return false, api.HandleHTTPError(resp)
+	if resp.StatusCode != http.StatusOK {
+		return false, api.UnexpectedStatusError(resp)
 	}
+
+	return true, nil
 }
 
-func createRelease(httpClient *http.Client, repo ghrepo.Interface, params map[string]interface{}) (*shared.Release, error) {
+func createRelease(httpClient *http.Client, repo ghrepo.Interface, params map[string]any) (*shared.Release, error) {
 	bodyBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
 	}
 
-	path := fmt.Sprintf("repos/%s/%s/releases", repo.RepoOwner(), repo.RepoName())
-	url := ghinstance.RESTPrefix(repo.RepoHost()) + path
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "releases")
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	if !success {
-		return nil, api.HandleHTTPError(resp)
-	}
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
+	// Check if we received a 404 while attempting to create a release without
+	// the workflow scope, and if so, return an error message that explains a possible
+	// solution to the user.
+	//
+	// If the same file (with both the same path and contents) exists
+	// on another branch in the repo, releases with workflow file changes can be
+	// created without the workflow scope. Otherwise, the workflow scope is
+	// required to create the release, but the API does not indicate this criteria
+	// beyond returning a 404.
+	//
+	// https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps#available-scopes
 	var newRelease shared.Release
-	err = json.Unmarshal(b, &newRelease)
-	return &newRelease, err
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	err = api.NewClientFromHTTP(httpClient).REST(repo.RepoHost(), http.MethodPost, path.String(), bytes.NewBuffer(bodyBytes), &newRelease)
+	if err != nil {
+		var httpErr api.HTTPError
+		if errors.As(err, &httpErr) &&
+			httpErr.StatusCode == http.StatusNotFound &&
+			!tokenHasWorkflowScope(httpErr.Headers) {
+			normalizedHostname := ghauth.NormalizeHostname(httpErr.RequestURL.Hostname())
+			return nil, &errMissingRequiredWorkflowScope{
+				Hostname: normalizedHostname,
+			}
+		}
+		return nil, err
+	}
+	return &newRelease, nil
 }
 
-func publishRelease(httpClient *http.Client, releaseURL string, discussionCategory string, isLatest *bool) (*shared.Release, error) {
-	params := map[string]interface{}{"draft": false}
+func publishRelease(httpClient *http.Client, host string, releaseURL safeurl.SafeURL, discussionCategory string, isLatest *bool) (*shared.Release, error) {
+	params := map[string]any{"draft": false}
 	if discussionCategory != "" {
 		params["discussion_category_name"] = discussionCategory
 	}
@@ -203,54 +193,75 @@ func publishRelease(httpClient *http.Client, releaseURL string, discussionCatego
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("PATCH", releaseURL, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode > 299 {
-		return nil, api.HandleHTTPError(resp)
-	}
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 
 	var release shared.Release
-	err = json.Unmarshal(b, &release)
-	return &release, err
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	err = api.NewClientFromHTTP(httpClient).REST(host, http.MethodPatch, releaseURL.String(), bytes.NewBuffer(bodyBytes), &release)
+	if err != nil {
+		return nil, err
+	}
+	return &release, nil
 }
 
-func deleteRelease(httpClient *http.Client, release *shared.Release) error {
-	req, err := http.NewRequest("DELETE", release.APIURL, nil)
+func deleteRelease(httpClient *http.Client, host string, releaseURL safeurl.SafeURL) error {
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	return api.NewClientFromHTTP(httpClient).REST(host, http.MethodDelete, releaseURL.String(), nil, nil)
+}
+
+// tokenHasWorkflowScope checks if the response token has the workflow scope.
+// Tokens that do not have OAuth scopes are assumed to have the workflow scope.
+func tokenHasWorkflowScope(headers http.Header) bool {
+	scopes := headers.Get("X-Oauth-Scopes")
+
+	// Return true when no scopes are present - no scopes in this header
+	// means that the user is probably authenticating with a token type other
+	// than an OAuth token, and we don't know what this token's scopes actually are.
+	if scopes == "" {
+		return true
+	}
+
+	// The API returns scopes separated by a comma and a space, so each element
+	// must be trimmed before comparison.
+	for s := range strings.SplitSeq(scopes, ",") {
+		if strings.TrimSpace(s) == "workflow" {
+			return true
+		}
+	}
+	return false
+}
+
+// isNewRelease checks if there are new commits since the latest release.
+func isNewRelease(httpClient *http.Client, repo ghrepo.Interface) (bool, error) {
+	ctx := context.Background()
+	release, err := shared.FetchLatestRelease(ctx, httpClient, repo)
 	if err != nil {
-		return err
+		if errors.Is(err, shared.ErrReleaseNotFound) {
+			return true, nil
+		} else {
+			return false, err
+		}
 	}
 
-	resp, err := httpClient.Do(req)
+	tagName := release.TagName
+	u, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "compare", tagName+"...HEAD")
 	if err != nil {
-		return err
+		return false, err
 	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
+	u.SetQuery("per_page", "1")
+
+	var comparisonStatus struct {
+		Status string `json:"status"`
 	}
 
-	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	if !success {
-		return api.HandleHTTPError(resp)
+	apiClient := api.NewClientFromHTTP(httpClient)
+	if err := apiClient.REST(repo.RepoHost(), "GET", u.String(), nil, &comparisonStatus); err != nil {
+		return false, err
 	}
 
-	if resp.StatusCode != 204 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-	}
-	return nil
+	isNew := comparisonStatus.Status == "ahead"
+	return isNew, nil
 }

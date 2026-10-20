@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cli/cli/v2/internal/prompter"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/stretchr/testify/assert"
@@ -93,12 +94,15 @@ func TestIsBinaryContents(t *testing.T) {
 }
 
 func TestPromptGists(t *testing.T) {
+	sixHours, _ := time.ParseDuration("6h")
+	sixHoursAgo := time.Now().Add(-sixHours)
+	sixHoursAgoFormatted := sixHoursAgo.Format(time.RFC3339Nano)
+
 	tests := []struct {
 		name          string
 		prompterStubs func(pm *prompter.MockPrompter)
 		response      string
-		wantOut       string
-		gist          *Gist
+		wantOut       Gist
 		wantErr       bool
 	}{
 		{
@@ -112,21 +116,21 @@ func TestPromptGists(t *testing.T) {
 			},
 			response: `{ "data": { "viewer": { "gists": { "nodes": [
 							{
-								"name": "gistid1",
+								"name": "1234",
 								"files": [{ "name": "cool.txt" }],
 								"description": "",
 								"updatedAt": "%[1]v",
 								"isPublic": true
 							},
 							{
-								"name": "gistid2",
+								"name": "5678",
 								"files": [{ "name": "gistfile0.txt" }],
 								"description": "",
 								"updatedAt": "%[1]v",
 								"isPublic": true
 							}
 						] } } } }`,
-			wantOut: "gistid1",
+			wantOut: Gist{ID: "1234", Files: map[string]*GistFile{"cool.txt": {Filename: "cool.txt"}}, UpdatedAt: sixHoursAgo, Public: true},
 		},
 		{
 			name: "multiple files, select second gist",
@@ -139,26 +143,53 @@ func TestPromptGists(t *testing.T) {
 			},
 			response: `{ "data": { "viewer": { "gists": { "nodes": [
 							{
-								"name": "gistid1",
+								"name": "1234",
 								"files": [{ "name": "cool.txt" }],
 								"description": "",
 								"updatedAt": "%[1]v",
 								"isPublic": true
 							},
 							{
-								"name": "gistid2",
+								"name": "5678",
 								"files": [{ "name": "gistfile0.txt" }],
 								"description": "",
 								"updatedAt": "%[1]v",
 								"isPublic": true
 							}
 						] } } } }`,
-			wantOut: "gistid2",
+			wantOut: Gist{ID: "5678", Files: map[string]*GistFile{"gistfile0.txt": {Filename: "gistfile0.txt"}}, UpdatedAt: sixHoursAgo, Public: true},
 		},
 		{
 			name:     "no files",
 			response: `{ "data": { "viewer": { "gists": { "nodes": [] } } } }`,
-			wantOut:  "",
+			wantOut:  Gist{},
+		},
+		{
+			name: "prompt list contains no-file gist (#10626)",
+			prompterStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterSelect("Select a gist",
+					[]string{"  about 6 hours ago", "gistfile0.txt  about 6 hours ago"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "  about 6 hours ago")
+					})
+			},
+			response: `{ "data": { "viewer": { "gists": { "nodes": [
+							{
+								"name": "1234",
+								"files": [],
+								"description": "",
+								"updatedAt": "%[1]v",
+								"isPublic": true
+							},
+							{
+								"name": "5678",
+								"files": [{ "name": "gistfile0.txt" }],
+								"description": "",
+								"updatedAt": "%[1]v",
+								"isPublic": true
+							}
+						] } } } }`,
+			wantOut: Gist{ID: "1234", Files: map[string]*GistFile{}, UpdatedAt: sixHoursAgo, Public: true},
 		},
 	}
 
@@ -166,15 +197,12 @@ func TestPromptGists(t *testing.T) {
 
 	for _, tt := range tests {
 		reg := &httpmock.Registry{}
-
 		const query = `query GistList\b`
-		sixHours, _ := time.ParseDuration("6h")
-		sixHoursAgo := time.Now().Add(-sixHours)
 		reg.Register(
 			httpmock.GraphQL(query),
 			httpmock.StringResponse(fmt.Sprintf(
 				tt.response,
-				sixHoursAgo.Format(time.RFC3339),
+				sixHoursAgoFormatted,
 			)),
 		)
 		client := &http.Client{Transport: reg}
@@ -185,9 +213,104 @@ func TestPromptGists(t *testing.T) {
 				tt.prompterStubs(mockPrompter)
 			}
 
-			gistID, err := PromptGists(mockPrompter, client, "github.com", ios.ColorScheme())
+			gist, err := PromptGists(mockPrompter, client, "github.com", ios.ColorScheme())
 			assert.NoError(t, err)
-			assert.Equal(t, tt.wantOut, gistID)
+			assert.Equal(t, tt.wantOut.ID, gist.ID)
+			reg.Verify(t)
+		})
+	}
+}
+
+func TestGetRawGistFile(t *testing.T) {
+	tests := []struct {
+		name        string
+		response    string
+		statusCode  int
+		want        string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:       "successful request",
+			response:   "Hello, World!",
+			statusCode: http.StatusOK,
+			want:       "Hello, World!",
+			wantErr:    false,
+		},
+		{
+			name:       "empty response",
+			response:   "",
+			statusCode: http.StatusOK,
+			want:       "",
+			wantErr:    false,
+		},
+		{
+			name:        "not found error",
+			response:    "Not Found",
+			statusCode:  http.StatusNotFound,
+			want:        "",
+			wantErr:     true,
+			errContains: "HTTP 404",
+		},
+		{
+			name:        "server error",
+			response:    "Internal Server Error",
+			statusCode:  http.StatusInternalServerError,
+			want:        "",
+			wantErr:     true,
+			errContains: "HTTP 500",
+		},
+		{
+			name:       "large content",
+			response:   "This is a very large file content with multiple lines\nLine 2\nLine 3\nAnd more content...",
+			statusCode: http.StatusOK,
+			want:       "This is a very large file content with multiple lines\nLine 2\nLine 3\nAnd more content...",
+			wantErr:    false,
+		},
+		{
+			name:       "special characters",
+			response:   "Special chars: àáâãäåæçèéêë 中文 🎉 \"quotes\" 'single'",
+			statusCode: http.StatusOK,
+			want:       "Special chars: àáâãäåæçèéêë 中文 🎉 \"quotes\" 'single'",
+			wantErr:    false,
+		},
+		{
+			name:       "JSON content",
+			response:   `{"name": "test", "version": "1.0.0", "dependencies": {"lodash": "^4.17.21"}}`,
+			statusCode: http.StatusOK,
+			want:       `{"name": "test", "version": "1.0.0", "dependencies": {"lodash": "^4.17.21"}}`,
+			wantErr:    false,
+		},
+		{
+			name:       "HTML content",
+			response:   "<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Hello</h1></body></html>",
+			statusCode: http.StatusOK,
+			want:       "<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Hello</h1></body></html>",
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &httpmock.Registry{}
+			reg.Register(
+				httpmock.REST("GET", "raw-url"),
+				httpmock.StatusStringResponse(tt.statusCode, tt.response),
+			)
+
+			client := &http.Client{Transport: reg}
+			result, err := GetRawGistFile(client, "github.com", safeurl.NewImmutableSafeURL("https://gist.githubusercontent.com/raw-url"))
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, result.Raw())
+			}
+
 			reg.Verify(t)
 		})
 	}

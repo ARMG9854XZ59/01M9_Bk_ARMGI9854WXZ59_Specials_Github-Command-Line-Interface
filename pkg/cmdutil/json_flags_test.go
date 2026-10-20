@@ -119,6 +119,44 @@ func TestAddJSONFlags(t *testing.T) {
 	}
 }
 
+func TestAddJSONFlagsWithoutShorthand(t *testing.T) {
+	tests := []struct {
+		name      string
+		setFlags  func(cmd *cobra.Command)
+		wantFlags map[string]string
+	}{
+		{
+			name: "no conflicting flags",
+			setFlags: func(cmd *cobra.Command) {
+				cmd.Flags().StringP("web", "w", "", "")
+				cmd.Flags().StringP("token", "t", "", "")
+			},
+			wantFlags: map[string]string{
+				"web":      "w",
+				"token":    "t",
+				"jq":       "",
+				"template": "",
+				"json":     "",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			cmd := &cobra.Command{Run: func(*cobra.Command, []string) {}}
+			tt.setFlags(cmd)
+
+			AddJSONFlagsWithoutShorthand(cmd, nil, []string{})
+
+			for f, shorthand := range tt.wantFlags {
+				flag := cmd.Flags().Lookup(f)
+				require.NotNil(t, flag)
+				require.Equal(t, shorthand, flag.Shorthand)
+			}
+		})
+	}
+}
+
 // TestAddJSONFlagsSetsAnnotations asserts that `AddJSONFlags` function adds the
 // appropriate annotation to the command, which could later be used by doc
 // generator functions.
@@ -262,7 +300,7 @@ func TestAddFormatFlags(t *testing.T) {
 
 func Test_exportFormat_Write(t *testing.T) {
 	type args struct {
-		data interface{}
+		data any
 	}
 	tests := []struct {
 		name     string
@@ -296,7 +334,7 @@ func Test_exportFormat_Write(t *testing.T) {
 			name:     "recursively call ExportData",
 			exporter: jsonExporter{fields: []string{"f1", "f2"}},
 			args: args{
-				data: map[string]interface{}{
+				data: map[string]any{
 					"s1": []exportableItem{{"i1"}, {"i2"}},
 					"s2": []exportableItem{{"i3"}},
 				},
@@ -355,8 +393,8 @@ type exportableItem struct {
 	Name string
 }
 
-func (e *exportableItem) ExportData(fields []string) map[string]interface{} {
-	m := map[string]interface{}{}
+func (e *exportableItem) ExportData(fields []string) map[string]any {
+	m := map[string]any{}
 	for _, f := range fields {
 		m[f] = fmt.Sprintf("%s:%s", e.Name, f)
 	}
@@ -404,7 +442,7 @@ func TestStructExportData(t *testing.T) {
 	fields := []string{"stringField", "intField", "boolField", "sliceField", "mapField", "structField"}
 	tests := []struct {
 		name    string
-		export  interface{}
+		export  any
 		fields  []string
 		wantOut string
 	}{

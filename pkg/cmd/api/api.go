@@ -18,6 +18,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/gh/ghtelemetry"
 	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/factory"
@@ -34,12 +35,14 @@ const (
 )
 
 type ApiOptions struct {
-	AppVersion string
-	BaseRepo   func() (ghrepo.Interface, error)
-	Branch     func() (string, error)
-	Config     func() (gh.Config, error)
-	HttpClient func() (*http.Client, error)
-	IO         *iostreams.IOStreams
+	AppVersion        string
+	InvokingAgent     string
+	BaseRepo          func() (ghrepo.Interface, error)
+	Branch            func() (string, error)
+	Config            func() (gh.Config, error)
+	HttpClient        func(api.HTTPClientOptions) (*http.Client, error)
+	IO                *iostreams.IOStreams
+	TelemetryDisabler ghtelemetry.Disabler
 
 	Hostname            string
 	RequestMethod       string
@@ -58,15 +61,20 @@ type ApiOptions struct {
 	CacheTTL            time.Duration
 	FilterOutput        string
 	Verbose             bool
+
+	AllowEscapeSequences bool
 }
 
 func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command {
 	opts := ApiOptions{
-		AppVersion: f.AppVersion,
-		BaseRepo:   f.BaseRepo,
-		Branch:     f.Branch,
-		Config:     f.Config,
-		IO:         f.IOStreams,
+		AppVersion:        f.AppVersion,
+		InvokingAgent:     f.InvokingAgent,
+		BaseRepo:          f.BaseRepo,
+		Branch:            f.Branch,
+		Config:            f.Config,
+		HttpClient:        api.NewHTTPClient,
+		IO:                f.IOStreams,
+		TelemetryDisabler: f.TelemetryDisabler,
 	}
 
 	cmd := &cobra.Command{
@@ -84,6 +92,13 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			Note that in some shells, for example PowerShell, you may need to enclose
 			any value that contains %[1]s{...}%[1]s in quotes to prevent the shell from
 			applying special meaning to curly braces.
+
+			The %[1]s-p/--preview%[1]s flag enables opting into previews, which are feature-flagged,
+			experimental API endpoints or behaviors. The API expects opt-in via the %[1]sAccept%[1]s
+			header with format %[1]sapplication/vnd.github.<preview-name>-preview+json%[1]s and this
+			command facilitates that via %[1]s--preview <preview-name>%[1]s. To send a request for
+			the corsair and scarlet witch previews, you could use %[1]s-p corsair,scarlet-witch%[1]s
+			or %[1]s--preview corsair --preview scarlet-witch%[1]s.
 
 			The default HTTP request method is %[1]sGET%[1]s normally and %[1]sPOST%[1]s if any parameters
 			were added. Override the method with %[1]s--method%[1]s.
@@ -124,39 +139,42 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			into an outer JSON array.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# list releases in the current repository
+			# List releases in the current repository
 			$ gh api repos/{owner}/{repo}/releases
 
-			# post an issue comment
+			# Post an issue comment
 			$ gh api repos/{owner}/{repo}/issues/123/comments -f body='Hi from CLI'
 
-			# post nested parameter read from a file
+			# Post nested parameter read from a file
 			$ gh api gists -F 'files[myfile.txt][content]=@myfile.txt'
 
-			# add parameters to a GET request
+			# Add parameters to a GET request
 			$ gh api -X GET search/issues -f q='repo:cli/cli is:open remote'
 
-			# set a custom HTTP header
+			# Use a JSON file as request body
+			$ gh api repos/{owner}/{repo}/rulesets --input file.json
+
+			# Set a custom HTTP header
 			$ gh api -H 'Accept: application/vnd.github.v3.raw+json' ...
 
-			# opt into GitHub API previews
+			# Opt into GitHub API previews
 			$ gh api --preview baptiste,nebula ...
 
-			# print only specific fields from the response
+			# Print only specific fields from the response
 			$ gh api repos/{owner}/{repo}/issues --jq '.[].title'
 
-			# use a template for the output
+			# Use a template for the output
 			$ gh api repos/{owner}/{repo}/issues --template \
 			  '{{range .}}{{.title}} ({{.labels | pluck "name" | join ", " | color "yellow"}}){{"\n"}}{{end}}'
 
-			# update allowed values of the "environment" custom property in a deeply nested array
-			gh api -X PATCH /orgs/{org}/properties/schema \
+			# Update allowed values of the "environment" custom property in a deeply nested array
+			$ gh api -X PATCH /orgs/{org}/properties/schema \
 			   -F 'properties[][property_name]=environment' \
 			   -F 'properties[][default_value]=production' \
 			   -F 'properties[][allowed_values][]=staging' \
 			   -F 'properties[][allowed_values][]=production'
 
-			# list releases with GraphQL
+			# List releases with GraphQL
 			$ gh api graphql -F owner='{owner}' -F name='{repo}' -f query='
 			  query($name: String!, $owner: String!) {
 			    repository(owner: $owner, name: $name) {
@@ -167,7 +185,7 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			  }
 			'
 
-			# list all repositories for a user
+			# List all repositories for a user
 			$ gh api graphql --paginate -f query='
 			  query($endCursor: String) {
 			    viewer {
@@ -182,7 +200,7 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			  }
 			'
 
-			# get the percentage of forks for the current user
+			# Get the percentage of forks for the current user
 			$ gh api graphql --paginate --slurp -f query='
 			  query($endCursor: String) {
 			    viewer {
@@ -199,19 +217,19 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 			[.[].data.viewer.repositories.nodes[]] as $r | count(select($r[].isFork))/count($r[])'
 		`),
 		Annotations: map[string]string{
-			"help:environment": heredoc.Doc(`
+			"help:environment": heredoc.Docf(`
 				GH_TOKEN, GITHUB_TOKEN (in order of precedence): an authentication token for
-				github.com API requests.
+				%[1]sgithub.com%[1]s API requests.
 
 				GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN (in order of precedence): an
 				authentication token for API requests to GitHub Enterprise.
 
-				GH_HOST: make the request to a GitHub host other than github.com.
-			`),
+				GH_HOST: make the request to a GitHub host other than %[1]sgithub.com%[1]s.
+			`, "`"),
 		},
 		Args: cobra.ExactArgs(1),
 		PreRun: func(c *cobra.Command, args []string) {
-			opts.BaseRepo = cmdutil.OverrideBaseRepoFunc(f, "")
+			opts.BaseRepo = cmdutil.OverrideBaseRepoFunc(f.BaseRepo, "")
 		},
 		RunE: func(c *cobra.Command, args []string) error {
 			opts.RequestPath = args[0]
@@ -239,17 +257,19 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 				return err
 			}
 
-			if opts.Slurp && !opts.Paginate {
-				return cmdutil.FlagErrorf("`--paginate` required when passing `--slurp`")
-			}
+			if opts.Slurp {
+				if err := cmdutil.MutuallyExclusive(
+					"the `--slurp` option is not supported with `--jq` or `--template`",
+					opts.Slurp,
+					opts.FilterOutput != "",
+					opts.Template != "",
+				); err != nil {
+					return err
+				}
 
-			if err := cmdutil.MutuallyExclusive(
-				"the `--slurp` option is not supported with `--jq` or `--template`",
-				opts.Slurp,
-				opts.FilterOutput != "",
-				opts.Template != "",
-			); err != nil {
-				return err
+				if !opts.Paginate {
+					return cmdutil.FlagErrorf("`--paginate` required when passing `--slurp`")
+				}
 			}
 
 			if err := cmdutil.MutuallyExclusive(
@@ -271,10 +291,10 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 
 	cmd.Flags().StringVar(&opts.Hostname, "hostname", "", "The GitHub hostname for the request (default \"github.com\")")
 	cmd.Flags().StringVarP(&opts.RequestMethod, "method", "X", "GET", "The HTTP method for the request")
-	cmd.Flags().StringArrayVarP(&opts.MagicFields, "field", "F", nil, "Add a typed parameter in `key=value` format")
+	cmd.Flags().StringArrayVarP(&opts.MagicFields, "field", "F", nil, "Add a typed parameter in `key=value` format (use \"@<path>\" or \"@-\" to read value from file or stdin)")
 	cmd.Flags().StringArrayVarP(&opts.RawFields, "raw-field", "f", nil, "Add a string parameter in `key=value` format")
 	cmd.Flags().StringArrayVarP(&opts.RequestHeaders, "header", "H", nil, "Add a HTTP request header in `key:value` format")
-	cmd.Flags().StringSliceVarP(&opts.Previews, "preview", "p", nil, "GitHub API preview `names` to request (without the \"-preview\" suffix)")
+	cmd.Flags().StringSliceVarP(&opts.Previews, "preview", "p", nil, "Opt into GitHub API previews (names should omit '-preview')")
 	cmd.Flags().BoolVarP(&opts.ShowResponseHeaders, "include", "i", false, "Include HTTP response status line and headers in the output")
 	cmd.Flags().BoolVar(&opts.Slurp, "slurp", false, "Use with \"--paginate\" to return an array of all pages of either JSON arrays or objects")
 	cmd.Flags().BoolVar(&opts.Paginate, "paginate", false, "Make additional HTTP requests to fetch all pages of results")
@@ -284,6 +304,7 @@ func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command 
 	cmd.Flags().StringVarP(&opts.FilterOutput, "jq", "q", "", "Query to select values from the response using jq syntax")
 	cmd.Flags().DurationVar(&opts.CacheTTL, "cache", 0, "Cache the response, e.g. \"3600s\", \"60m\", \"1h\"")
 	cmd.Flags().BoolVar(&opts.Verbose, "verbose", false, "Include full HTTP request and response in the output")
+	cmd.Flags().BoolVar(&opts.AllowEscapeSequences, "allow-escape-sequences", false, "Allow printing terminal escape sequences")
 	return cmd
 }
 
@@ -300,7 +321,7 @@ func apiRun(opts *ApiOptions) error {
 	}
 	method := opts.RequestMethod
 	requestHeaders := opts.RequestHeaders
-	var requestBody interface{}
+	var requestBody any
 	if len(params) > 0 {
 		requestBody = params
 	}
@@ -317,7 +338,13 @@ func apiRun(opts *ApiOptions) error {
 		}
 	}
 
-	var bodyWriter io.Writer = opts.IO.Out
+	// Response content funnels through ContentOut. It stays in passthrough here:
+	// JSON is sanitized by the transport and the jq/template/jsoncolor paths emit
+	// our own formatting, so only a raw non-JSON body needs neutralizing, done at
+	// its copy below.
+	opts.IO.SetContentSanitization(false)
+
+	var bodyWriter io.Writer = opts.IO.ContentOut
 	var headersWriter io.Writer = opts.IO.Out
 	if opts.Silent {
 		bodyWriter = io.Discard
@@ -366,24 +393,23 @@ func apiRun(opts *ApiOptions) error {
 	}
 
 	if opts.HttpClient == nil {
-		opts.HttpClient = func() (*http.Client, error) {
-			log := opts.IO.ErrOut
-			if opts.Verbose {
-				log = opts.IO.Out
-			}
-			opts := api.HTTPClientOptions{
-				AppVersion:     opts.AppVersion,
-				CacheTTL:       opts.CacheTTL,
-				Config:         cfg.Authentication(),
-				EnableCache:    opts.CacheTTL > 0,
-				Log:            log,
-				LogColorize:    opts.IO.ColorEnabled(),
-				LogVerboseHTTP: opts.Verbose,
-			}
-			return api.NewHTTPClient(opts)
-		}
+		opts.HttpClient = api.NewHTTPClient
 	}
-	httpClient, err := opts.HttpClient()
+	log := opts.IO.ErrOut
+	if opts.Verbose {
+		log = opts.IO.Out
+	}
+	httpClient, err := opts.HttpClient(api.HTTPClientOptions{
+		AppVersion:        opts.AppVersion,
+		InvokingAgent:     opts.InvokingAgent,
+		CacheTTL:          opts.CacheTTL,
+		Config:            cfg.Authentication(),
+		EnableCache:       opts.CacheTTL > 0,
+		Log:               log,
+		LogColorize:       opts.IO.ColorEnabled(),
+		LogVerboseHTTP:    opts.Verbose,
+		TelemetryDisabler: opts.TelemetryDisabler,
+	})
 	if err != nil {
 		return err
 	}
@@ -394,6 +420,8 @@ func apiRun(opts *ApiOptions) error {
 		host = opts.Hostname
 	}
 
+	apiHost, _ := cfg.Authentication().APIHostForHost(host)
+
 	tmpl := template.New(bodyWriter, opts.IO.TerminalWidth(), opts.IO.ColorEnabled())
 	err = tmpl.Parse(opts.Template)
 	if err != nil {
@@ -403,7 +431,7 @@ func apiRun(opts *ApiOptions) error {
 	isFirstPage := true
 	hasNextPage := true
 	for hasNextPage {
-		resp, err := httpRequest(httpClient, host, method, requestPath, requestBody, requestHeaders)
+		resp, err := httpRequest(httpClient, host, apiHost, method, requestPath, requestBody, requestHeaders)
 		if err != nil {
 			return err
 		}
@@ -444,6 +472,8 @@ func apiRun(opts *ApiOptions) error {
 	return tmpl.Flush()
 }
 
+var jsonContentTypeRE = regexp.MustCompile(`[/+]json(;|$)`)
+
 func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersWriter io.Writer, template *template.Template, isFirstPage, isLastPage bool) (endCursor string, err error) {
 	if opts.ShowResponseHeaders {
 		fmt.Fprintln(headersWriter, resp.Proto, resp.Status)
@@ -457,13 +487,15 @@ func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersW
 	var responseBody io.Reader = resp.Body
 	defer resp.Body.Close()
 
-	isJSON, _ := regexp.MatchString(`[/+]json(;|$)`, resp.Header.Get("Content-Type"))
+	isJSON := jsonContentTypeRE.MatchString(resp.Header.Get("Content-Type"))
 
 	var serverError string
 	if isJSON && (opts.RequestPath == "graphql" || resp.StatusCode >= 400) {
-		responseBody, serverError, err = parseErrorResponse(responseBody, resp.StatusCode)
-		if err != nil {
-			return
+		if !strings.EqualFold(opts.RequestMethod, "HEAD") {
+			responseBody, serverError, err = parseErrorResponse(responseBody, resp.StatusCode)
+			if err != nil {
+				return
+			}
 		}
 	}
 
@@ -499,7 +531,20 @@ func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersW
 				isLastPage:  isLastPage,
 			}
 		}
-		_, err = io.Copy(bodyWriter, responseBody)
+		// A raw non-JSON body is the only response the transport does not sanitize.
+		// It is faithful byte output, so binary bound for a terminal and text
+		// carrying escape sequences are refused; the opt-out flag and discarded
+		// output stream verbatim.
+		if !isJSON && !opts.AllowEscapeSequences && bodyWriter != io.Discard {
+			err = iostreams.CopyGuardedContent(bodyWriter, responseBody, opts.IO.IsStdoutTTY())
+			if binErr, ok := errors.AsType[iostreams.BinaryTerminalError](err); ok {
+				err = fmt.Errorf("%w; redirect or pipe stdout to save it, or pass --allow-escape-sequences to output it anyway", binErr)
+			} else if errors.Is(err, iostreams.ErrEscapeSequence) {
+				err = errors.New("the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway")
+			}
+		} else {
+			_, err = io.Copy(bodyWriter, responseBody)
+		}
 	}
 	if err != nil {
 		return

@@ -46,8 +46,8 @@ func NewCmdArchiveItem(f *cmdutil.Factory, runF func(config archiveItemConfig) e
 		Short: "Archive an item in a project",
 		Use:   "item-archive [<number>]",
 		Example: heredoc.Doc(`
-			# archive an item in the current user's project "1"
-			gh project item-archive 1 --owner "@me" --id <item-ID>
+			# Archive an item in the current user's project "1"
+			$ gh project item-archive 1 --owner "@me" --id <item-ID>
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -127,8 +127,8 @@ func runArchiveItem(config archiveItemConfig) error {
 	return printResults(config, query.ArchiveProjectItem.ProjectV2Item)
 }
 
-func archiveItemArgs(config archiveItemConfig) (*archiveProjectItemMutation, map[string]interface{}) {
-	return &archiveProjectItemMutation{}, map[string]interface{}{
+func archiveItemArgs(config archiveItemConfig) (*archiveProjectItemMutation, map[string]any) {
+	return &archiveProjectItemMutation{}, map[string]any{
 		"input": githubv4.ArchiveProjectV2ItemInput{
 			ProjectID: githubv4.ID(config.opts.projectID),
 			ItemID:    githubv4.ID(config.opts.itemID),
@@ -136,8 +136,8 @@ func archiveItemArgs(config archiveItemConfig) (*archiveProjectItemMutation, map
 	}
 }
 
-func unarchiveItemArgs(config archiveItemConfig, itemID string) (*unarchiveProjectItemMutation, map[string]interface{}) {
-	return &unarchiveProjectItemMutation{}, map[string]interface{}{
+func unarchiveItemArgs(config archiveItemConfig, itemID string) (*unarchiveProjectItemMutation, map[string]any) {
+	return &unarchiveProjectItemMutation{}, map[string]any{
 		"input": githubv4.UnarchiveProjectV2ItemInput{
 			ProjectID: githubv4.ID(config.opts.projectID),
 			ItemID:    githubv4.ID(itemID),

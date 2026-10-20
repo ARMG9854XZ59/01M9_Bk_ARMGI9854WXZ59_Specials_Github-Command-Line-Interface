@@ -1,63 +1,136 @@
 # Installing gh on Linux and BSD
 
-Packages downloaded from https://cli.github.com or from https://github.com/cli/cli/releases
-are considered official binaries. We focus on popular Linux distros and
-the following CPU architectures: `i386`, `amd64`, `arm64`, `armhf`.
+## Recommended _(Official)_
 
-Other sources for installation are community-maintained and thus might lag behind
-our release schedule.
+> [!IMPORTANT]
+> Our Linux packages and repository metadata are signed with the following PGP key fingerprints:
+> - `2C6106201985B60E6C7AC87323F3D4EA75716059`
+> - `7F38BBB59D064DBCB3D84D725612B36462313325`
+>
+> You may be prompted to confirm the import of these keys during installation.
+>
+> <details><summary>Expand for SHA256/SHA512/MD5 checksums of our official keyring files.</summary>
+> <p>
+>
+>  **For security reasons, it is strongly recommended to only rely on SHA256/SHA512 checksums. MD5 checksums below are only for legacy systems where SHA256/SHA512 tooling is not available.**
+>
+> - `https://cli.github.com/packages/githubcli-archive-keyring.gpg` (Binary):
+>    ```
+>    SHA256: 6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
+>    SHA512: ce6b9466dbd2a90b3227e177aa9b8187bd2405b1c29f91d78de83b9699dbbe2af35efd733bf53da622e7a38c59a7bc55539d63a3deae3c9ff9c2bff8af626434
+>    MD5:    23748c0965069fb1edae1b83c17890e1
+>    ```
+> - `https://cli.github.com/packages/githubcli-archive-keyring.asc` (ASCII-armored):
+>    ```
+>    SHA256: cec6e9ed82d3949ca5f4428cc968b41ef5e7416cb3653cdfc2a421977663bbfd
+>    SHA512: 2ca9487d88a508a1c87f06b46ba336b11cc5f20bd83915b4c2acde49d2cffbbce76af1641bf8494c29a765f96bc1fd694ebde2954b28b80dcc76376b6f1b766d
+>    MD5:    97100400ef48007b69e42be348cc6582
+>    ```
+>
+> </p>
+> </details>
 
-## Official sources
+### Debian
 
-### Debian, Ubuntu Linux, Raspberry Pi OS (apt)
+Debian packages are hosted on the [GitHub CLI marketing site](https://cli.github.com/) for various operating systems including:
 
-Install:
+- [Debian](https://www.debian.org/)
+- [Raspberry Pi](https://www.raspberrypi.com/)
+- [Ubuntu Linux](https://ubuntu.com/)
+
+These packages are supported by the GitHub CLI maintainers with updates powered by [GitHub CLI deployment workflow](https://github.com/cli/cli/actions/workflows/deployment.yml).
+
+To install:
 
 ```bash
-(type -p wget >/dev/null || (sudo apt update && sudo apt-get install wget -y)) \
-&& sudo mkdir -p -m 755 /etc/apt/keyrings \
-&& wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
-&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-&& sudo apt update \
-&& sudo apt install gh -y
+(type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
+	&& sudo mkdir -p -m 755 /etc/apt/keyrings \
+	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+	&& cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+	&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+	&& sudo mkdir -p -m 755 /etc/apt/sources.list.d \
+	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+	&& sudo apt update \
+	&& sudo apt install gh -y
 ```
 
-> **Note**
-> We were recently forced to change our GPG signing key. If you've previously downloaded the `githubcli-archive-keyring.gpg` file, you should re-download it again per above instructions. If you are using a keyserver to download the key, the ID of the new key is `23F3D4EA75716059`.
-
-Upgrade:
+To upgrade:
 
 ```bash
 sudo apt update
 sudo apt install gh
 ```
 
-### Fedora, CentOS, Red Hat Enterprise Linux (dnf)
+> [!TIP]
+> To verify PGP keys before installing `gh`, you can run this and match the listed fingerprints with those at the top of this document:
+>
+> ```shell
+> curl -fsSL -o - https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --show-keys
+> ```
 
-Install from our package repository for immediate access to latest releases:
+### RPM
+
+RPM packages are hosted on the [GitHub CLI marketing site](https://cli.github.com) for various operating systems including:
+
+- [Amazon Linux 2](https://aws.amazon.com/amazon-linux-2/)
+- [CentOS](https://www.centos.org/)
+- [Fedora](https://fedoraproject.org/)
+- [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux)
+- [openSUSE](https://www.opensuse.org/)
+- [SUSE](https://www.suse.com/)
+
+These packages are supported by the GitHub CLI maintainers with updates powered by [GitHub CLI deployment workflow](https://github.com/cli/cli/actions/workflows/deployment.yml).
+
+> [!TIP]
+> During installation, you may be prompted to confirm the import of PGP keys. You can verify the keys with the list of fingerprints at the top of this document.
+>
+> To verify the PGP keys before installing `gh`, you can run the following command and match the listed fingerprints with those at the top of this document:
+>
+> ```shell
+> curl -fsSL -o - https://cli.github.com/packages/githubcli-archive-keyring.asc | gpg --show-keys
+> ```
+
+#### DNF5
+
+> [!IMPORTANT]
+> **These commands apply to DNF5 only**. If you're using DNF4, please use [the DNF4 instructions](#dnf4).
+
+To install:
 
 ```bash
-sudo dnf install 'dnf-command(config-manager)'
-sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
-sudo dnf install gh --repo gh-cli
-```
-
-Alternatively, install from the [community repository](https://packages.fedoraproject.org/pkgs/gh/gh/):
-
-```bash
+sudo dnf install dnf5-plugins
+sudo dnf config-manager addrepo --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo
 sudo dnf install gh
 ```
 
-Upgrade:
+To upgrade:
 
 ```bash
 sudo dnf update gh
 ```
 
-### Amazon Linux 2 (yum)
+#### DNF4
 
-Install using our package repository for immediate access to latest releases:
+> [!IMPORTANT]
+> **These commands apply to DNF4 only**. If you're using DNF5, please use [the DNF5 instructions](#dnf5).
+
+To install:
+
+```bash
+sudo dnf install 'dnf-command(config-manager)'
+sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+sudo dnf install gh
+```
+
+To upgrade:
+
+```bash
+sudo dnf update gh
+```
+
+#### Amazon Linux 2 (yum)
+
+To install:
 
 ```bash
 type -p yum-config-manager >/dev/null || sudo yum install yum-utils
@@ -65,18 +138,15 @@ sudo yum-config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.re
 sudo yum install gh
 ```
 
-> **Note**
-> We were recently forced to change our GPG signing key. If you've added the repository previously and now you're getting a GPG signing key error, disable the repository first with `sudo yum-config-manager --disable gh-cli` and add it again with `sudo yum-config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo`.
-
-Upgrade:
+To upgrade:
 
 ```bash
 sudo yum update gh
 ```
 
-### openSUSE/SUSE Linux (zypper)
+#### openSUSE/SUSE Linux (zypper)
 
-Install:
+To install:
 
 ```bash
 sudo zypper addrepo https://cli.github.com/packages/rpm/gh-cli.repo
@@ -84,47 +154,147 @@ sudo zypper ref
 sudo zypper install gh
 ```
 
-Upgrade:
+To upgrade:
 
 ```bash
 sudo zypper ref
 sudo zypper update gh
 ```
 
-## Manual installation
+### Homebrew
 
-* [Download release binaries][releases page] that match your platform; or
-* [Build from source](./source.md).
+[Homebrew](https://brew.sh/) is a free and open-source software package management system that simplifies the installation of software on Apple's operating system, macOS, as well as Linux.
 
-## Unofficial, community-supported methods
+The [GitHub CLI formulae](https://formulae.brew.sh/formula/gh) is supported by the GitHub CLI maintainers with help from our friends at Homebrew with updates powered by [homebrew/homebrew-core](https://github.com/Homebrew/homebrew-core/blob/main/Formula/g/gh.rb).
 
-The GitHub CLI team does not maintain the following packages or repositories and thus we are unable to provide support for those installation methods.
+To install:
 
-### Snap (do not use)
-
-There are [so many issues with Snap](https://github.com/casperdcl/cli/issues/7) as a runtime mechanism for apps like GitHub CLI that our team suggests _never installing gh as a snap_.
-
-### Arch Linux
-
-Arch Linux users can install from the [extra repo][arch linux repo]:
-
-```bash
-sudo pacman -S github-cli
+```shell
+brew install gh
 ```
 
-Alternatively, use the [unofficial AUR package][arch linux aur] to build GitHub CLI from source.
+To upgrade:
+
+```shell
+brew upgrade gh
+```
+
+### Precompiled binaries
+
+[GitHub CLI releases](https://github.com/cli/cli/releases/latest) contain precompiled binaries for `386`, `amd64`, `arm64`, and `armv6` architectures.
+
+## Community _(Unofficial)_
+
+> [!IMPORTANT]
+> The GitHub CLI team does not maintain the following packages or repositories. We are unable to provide support for these installation methods or any guarantees of stability, security, or availability for these installation methods.
+
+### Alpine Linux
+
+The [GitHub CLI package](https://pkgs.alpinelinux.org/package/edge/community/x86_64/github-cli) is supported by the Alpine Linux community with updates powered by [alpine/aports](https://gitlab.alpinelinux.org/alpine/aports/-/tree/master/community/github-cli).
+
+To install stable release:
+
+```bash
+apk add github-cli
+```
+
+To install edge release:
+
+```bash
+echo "@community http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
+apk add github-cli@community
+```
 
 ### Android
 
-Android 7+ users can install via [Termux](https://wiki.termux.com/wiki/Main_Page):
+The [GitHub CLI package](https://packages.termux.dev/apt/termux-main/pool/main/g/gh/) is supported by the Termux community with updates powered by [termux/termux-packages](https://github.com/termux/termux-packages/tree/master/packages/gh).
+
+To install and upgrade:
 
 ```bash
 pkg install gh
 ```
 
+### Arch Linux
+
+The [GitHub CLI package](https://www.archlinux.org/packages/extra/x86_64/github-cli) is supported by the Arch Linux community with updates powered by [Arch Linux packaging](https://gitlab.archlinux.org/archlinux/packaging/packages/github-cli).
+
+To install:
+
+```bash
+sudo pacman -S github-cli
+```
+
+To upgrade all packages:
+
+```bash
+sudo pacman -Syu
+```
+
+Alternatively, use the [unofficial AUR package](https://aur.archlinux.org/packages/github-cli-git) to build GitHub CLI from source.
+
+### Conda
+
+[Conda](https://docs.conda.io/en/latest/) is an open source package management system and environment management system for installing multiple versions of software packages and their dependencies and switching easily between them. It works on Linux, OS X and Windows, and was created for Python programs but can package and distribute any software.
+
+The [GitHub CLI package](https://anaconda.org/conda-forge/gh) is supported by the Conda community with updates powered by [conda-forge/gh-feedstock](https://github.com/conda-forge/gh-feedstock#installing-gh).
+
+To install:
+
+```shell
+conda install gh --channel conda-forge
+```
+
+To upgrade:
+
+```shell
+conda update gh --channel conda-forge
+```
+
+### Debian Community
+
+The [GitHub CLI package](https://packages.debian.org/stable/gh) is supported by the Debian community with updates powered by [Debian Go Packaging Team](https://salsa.debian.org/go-team/packages/gh).
+
+> [!NOTE]
+> As of November 2025, GitHub CLI maintainers strongly recommend [official Debian packages](#debian) especially as the community-distributed `2.45.x` / `2.46.x` version is broken due to deprecated GitHub APIs.
+
+### Fedora Community
+
+The [GitHub CLI package](https://packages.fedoraproject.org/pkgs/gh/gh/) is supported by the Fedora community with updates powered by [Fedora Project](https://src.fedoraproject.org/rpms/gh).
+
+To install:
+
+```bash
+sudo dnf install gh
+```
+
+To upgrade:
+
+```bash
+sudo dnf update gh
+```
+
+### Flox
+
+[Flox](https://flox.dev/) is a virtual environment and package manager all in one. With Flox you create environments that layer and replace dependencies just where it matters, making them portable across the full software lifecycle.
+
+Flox relies upon the [GitHub CLI package](https://github.com/NixOS/nixpkgs/blob/master/pkgs/by-name/gh/gh/package.nix) supported by the [NixOS community](https://nixos.org/)
+
+To install:
+
+```shell
+flox install gh
+```
+
+To upgrade:
+
+```shell
+flox upgrade toplevel
+```
+
 ### FreeBSD
 
-FreeBSD users can install from the [ports collection](https://www.freshports.org/devel/gh/):
+The [GitHub CLI port](https://www.freshports.org/devel/gh/) is supported by the FreeBSD community with updates powered by [FreeBSD ports](https://cgit.freebsd.org/ports/tree/devel/gh).
 
 ```bash
 cd /usr/ports/devel/gh/ && make install clean
@@ -136,105 +306,182 @@ Or via [pkg(8)](https://www.freebsd.org/cgi/man.cgi?pkg(8)):
 pkg install gh
 ```
 
-### NetBSD/pkgsrc
-
-NetBSD users and those on [platforms supported by pkgsrc](https://pkgsrc.org/#index4h1) can install the [gh package](https://pkgsrc.se/net/gh):
-
-```bash
-pkgin install gh
-```
-
-To install from source:
-
-```bash
-cd /usr/pkgsrc/net/gh && make package-install
-```
-
-### OpenBSD
-
-In -current, or in releases starting from 7.0, OpenBSD users can install from packages:
-
-```
-pkg_add github-cli
-```
-
 ### Funtoo
 
-Funtoo Linux has an autogenerated github-cli package, located in [dev-kit](https://github.com/funtoo/dev-kit/tree/1.4-release/dev-util/github-cli), which can be installed in the following way:
+The GitHub CLI portage is supported by the Funtoo community with updates powered by [funtoo/dev-kit](https://github.com/funtoo/dev-kit/tree/1.4-release/dev-util/github-cli).
 
-``` bash
+To install:
+
+```bash
 emerge -av github-cli
 ```
 
-Upgrading can be done by syncing the repos and then requesting an upgrade:
+To upgrade:
 
-``` bash
+```bash
 ego sync
 emerge -u github-cli
 ```
 
 ### Gentoo
 
-Gentoo Linux users can install from the [main portage tree](https://packages.gentoo.org/packages/dev-util/github-cli):
+The [GitHub CLI portage](https://packages.gentoo.org/packages/dev-util/github-cli) is supported by the Gentoo community with updates powered by [Gentoo portage](https://gitweb.gentoo.org/repo/gentoo.git/tree/dev-util/github-cli).
+
+To install:
 
 ``` bash
 emerge -av github-cli
 ```
 
-Upgrading can be done by updating the portage tree and then requesting an upgrade:
+To upgrade:
 
 ``` bash
 emerge --sync
 emerge -u github-cli
 ```
 
-### Kiss Linux
+### Manjaro Linux
 
-Kiss Linux users can install from the [community repos](https://github.com/kisslinux/community):
+The [GitHub CLI package](https://manjaristas.org/branch_compare?q=github-cli) is the same package produced by the [Arch Linux community](#arch-linux)
+
+To install and upgrade:
 
 ```bash
-kiss b github-cli && kiss i github-cli
+pamac install github-cli
+```
+
+### MidnightBSD
+
+The [GitHub CLI port](https://www.midnightbsd.org/mports/devel/gh/README.html) is supported by the MidnightBSD community with updates powered by [MidnightBSD/mports](https://github.com/MidnightBSD/mports/tree/master/devel/gh).
+
+To install:
+
+```bash
+cd /usr/mports/devel/gh/ && make install clean
+```
+
+Or via [mport(1)](http://man.midnightbsd.org/cgi-bin/man.cgi/mport):
+
+```bash
+mport install gh
+```
+
+### NetBSD/pkgsrc
+
+The [GitHub CLI package](https://pkgsrc.se/net/gh) is supported by the NetBSD community with updates powered by [NetBSD/pkgsrc](https://github.com/NetBSD/pkgsrc/tree/trunk/net/gh).
+
+To install:
+
+```bash
+pkgin install gh
 ```
 
 ### Nix/NixOS
 
-Nix/NixOS users can install from [nixpkgs](https://search.nixos.org/packages?query=gh&sort=relevance&show=gh):
+The [GitHub CLI package](https://search.nixos.org/packages?query=gh&sort=relevance&show=gh) is supported by the NixOS community with updates powered by [NixOS/nixpkgs](https://github.com/NixOS/nixpkgs/tree/master/pkgs/by-name/gh/gh).
+
+For temporary use:
 
 ```bash
-nix-env -iA nixos.gh
+nix-shell -p gh
+```
+
+For permanent installation, see the [NixOS package instructions](https://search.nixos.org/packages?query=gh&sort=relevance&show=gh) to declare `pkgs.gh` in your NixOS configuration or Home Manager.
+
+### OpenBSD
+
+The [GitHub CLI port](https://openports.pl/path/devel/github-cli) is supported by the OpenBSD community with updates powered by [OpenBSD ports](https://cvsweb.openbsd.org/ports/devel/github-cli/).
+
+To install:
+
+```shell
+pkg_add github-cli
 ```
 
 ### openSUSE Tumbleweed
 
-openSUSE Tumbleweed users can install from the [official distribution repo](https://software.opensuse.org/package/gh):
-```bash
-sudo zypper in gh
-```
+The [GitHub CLI package](https://software.opensuse.org/package/gh) is supported by the openSUSE community.
 
-### Alpine Linux
-
-Alpine Linux users can install from the [stable releases' community package repository](https://pkgs.alpinelinux.org/packages?name=github-cli&branch=v3.15).
+To install:
 
 ```bash
-apk add github-cli
+sudo zypper install gh
 ```
 
-Users wanting the latest version of the CLI without waiting to be backported into the stable release they're using should use the edge release's
-community repo through this method below, without mixing packages from stable and unstable repos.[^1]
+To upgrade:
 
 ```bash
-echo "@community http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
-apk add github-cli@community
+sudo zypper update gh
 ```
+
+### Solus Linux
+
+The GitHub CLI package is supported by the Solus Linux community with updates powered by [getsolus/packages](https://github.com/getsolus/packages/blob/main/packages/g/github-cli/).
+
+To install:
+
+```bash
+sudo eopkg install github-cli
+```
+
+### Spack
+
+[Spack](https://spack.io/) is a flexible package manager supporting multiple versions, configurations, platforms, and compilers for supercomputers, Linux, and macOS.
+
+The [GitHub CLI package](https://packages.spack.io/package.html?name=gh) is supported by the Spack community with updates powered by [spack/spack-packages](https://github.com/spack/spack-packages/tree/develop/repos/spack_repo/builtin/packages/gh).
+
+To install:
+
+```shell
+spack install gh
+```
+
+To upgrade:
+
+```shell
+spack uninstall gh && spack install gh
+```
+
+### Ubuntu Community
+
+The [GitHub CLI package](https://packages.ubuntu.com/noble/gh) is synced from [upstream Debian Community package](#debian-community).
+
+> [!NOTE]
+> As of November 2025, GitHub CLI maintainers strongly recommend [official Debian packages](#debian) especially as the community-distributed `2.45.x` / `2.46.x` version is broken due to deprecated GitHub APIs.
 
 ### Void Linux
-Void Linux users can install from the [official distribution repo](https://voidlinux.org/packages/?arch=x86_64&q=github-cli):
+
+The [GitHub CLI package](https://voidlinux.org/packages/?arch=x86_64&q=github-cli): is supported by the Void Linux community with updates powered by [void-linux/void-packages](https://github.com/void-linux/void-packages/tree/master/srcpkgs/github-cli).
+
+To install:
 
 ```bash
 sudo xbps-install github-cli
 ```
 
-[releases page]: https://github.com/cli/cli/releases/latest
-[arch linux repo]: https://www.archlinux.org/packages/extra/x86_64/github-cli
-[arch linux aur]: https://aur.archlinux.org/packages/github-cli-git
-[^1]: https://wiki.alpinelinux.org/wiki/Package_management#Repository_pinning
+### Webi
+
+[Webi](https://webinstall.dev/) is a tool that aims to effortlessly install developer tools with easy-to-remember URLs from official builds quickly, without sudo or Admin, without a package manager, and without changing system file permissions.
+
+The [GitHub CLI package](https://webinstall.dev/gh/) is supported by the Webi community with updates powered by [webinstall/webi-installers](https://github.com/webinstall/webi-installers/tree/main/gh).
+
+To install:
+
+```shell
+curl -sS https://webi.sh/gh | sh
+```
+
+To upgrade:
+
+```shell
+webi gh@stable
+```
+
+## Discouraged
+
+> [!WARNING]
+> The GitHub CLI team actively discourages use of the following methods of installation.
+
+### Snap
+
+The [GitHub CLI package](https://snapcraft.io/gh) has [so many issues with Snap](https://github.com/casperdcl/cli/issues/7) as a runtime mechanism for apps like GitHub CLI that our team suggests _never installing gh as a snap_.

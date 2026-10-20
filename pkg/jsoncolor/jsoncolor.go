@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	colorDelim  = "1;38" // bright white
+	colorDelim  = "1;37" // bold white
 	colorKey    = "1;34" // bright blue
 	colorNull   = "36"   // cyan
 	colorString = "32"   // green
@@ -119,7 +119,7 @@ func WriteDelims(w io.Writer, delims, indent string) error {
 }
 
 // marshalJSON works like json.Marshal but with HTML-escaping disabled
-func marshalJSON(v interface{}) ([]byte, error) {
+func marshalJSON(v any) ([]byte, error) {
 	buf := bytes.Buffer{}
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)

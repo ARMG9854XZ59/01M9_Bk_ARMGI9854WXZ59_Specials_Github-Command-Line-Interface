@@ -11,6 +11,8 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/google/shlex"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -87,7 +89,7 @@ func isRootCmd(command *cobra.Command) bool {
 	return command != nil && !command.HasParent()
 }
 
-func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, args []string) {
+func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, _ []string) {
 	flags := command.Flags()
 
 	if isRootCmd(command) {
@@ -109,7 +111,19 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, args []string) {
 		return
 	}
 
-	namePadding := 12
+	WriteHelp(f.IOStreams.Out, cs, command)
+}
+
+// WriteHelp renders the full help text for command to w. This is the same
+// output produced by `gh <command> --help`, exposed separately so that callers
+// such as error reporting can render help to a stream of their choosing rather
+// than always writing to stdout.
+//
+// A user-defined alias is resolved to the command it expands to, so that
+// callers see the target's flags and examples rather than the alias stub. This
+// mirrors the usage and help funcs configured for aliases in NewCmdRoot.
+func WriteHelp(w io.Writer, cs *iostreams.ColorScheme, command *cobra.Command) {
+	command = resolveAliasTarget(command)
 
 	type helpEntry struct {
 		Title string
@@ -135,6 +149,12 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, args []string) {
 		helpEntries = append(helpEntries, helpEntry{"ALIASES", strings.Join(BuildAliasList(command, command.Aliases), ", ") + "\n"})
 	}
 
+	// Statically calculated padding for non-extension commands,
+	// longest is `gh accessibility` with 13 characters + 1 space.
+	//
+	// Should consider novel way to calculate this in the future [AF]
+	namePadding := 14
+
 	for _, g := range GroupedCommands(command) {
 		var names []string
 		for _, c := range g.Commands {
@@ -148,6 +168,9 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, args []string) {
 
 	if isRootCmd(command) {
 		var helpTopics []string
+		if c := findCommand(command, "accessibility"); c != nil {
+			helpTopics = append(helpTopics, rpad(c.Name()+":", namePadding)+c.Short)
+		}
 		if c := findCommand(command, "actions"); c != nil {
 			helpTopics = append(helpTopics, rpad(c.Name()+":", namePadding)+c.Short)
 		}
@@ -182,19 +205,20 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, args []string) {
 	helpEntries = append(helpEntries, helpEntry{"LEARN MORE", heredoc.Docf(`
 		Use %[1]sgh <command> <subcommand> --help%[1]s for more information about a command.
 		Read the manual at https://cli.github.com/manual
+		Learn about exit codes using %[1]sgh help exit-codes%[1]s
+		Learn about accessibility experiences using %[1]sgh help accessibility%[1]s
 	`, "`")})
 
-	out := f.IOStreams.Out
 	for _, e := range helpEntries {
 		if e.Title != "" {
 			// If there is a title, add indentation to each line in the body
-			fmt.Fprintln(out, cs.Bold(e.Title))
-			fmt.Fprintln(out, text.Indent(strings.Trim(e.Body, "\r\n"), "  "))
+			fmt.Fprintln(w, cs.Bold(e.Title))
+			fmt.Fprintln(w, text.Indent(strings.Trim(e.Body, "\r\n"), "  "))
 		} else {
 			// If there is no title print the body as is
-			fmt.Fprintln(out, e.Body)
+			fmt.Fprintln(w, e.Body)
 		}
-		fmt.Fprintln(out)
+		fmt.Fprintln(w)
 	}
 }
 
@@ -322,4 +346,27 @@ func BuildAliasList(cmd *cobra.Command, aliases []string) []string {
 	}
 
 	return BuildAliasList(cmd.Parent(), aliasesWithParentAliases)
+}
+
+// aliasExpansionAnnotation records the command line a user-defined alias
+// expands to, so that help rendering can resolve the alias to its target.
+const aliasExpansionAnnotation = "gh:alias-expansion"
+
+// resolveAliasTarget returns the command a user-defined alias expands to, or
+// command unchanged when it is not an alias or the target cannot be resolved.
+// Shell aliases have no target command and are always returned unchanged.
+func resolveAliasTarget(command *cobra.Command) *cobra.Command {
+	expansion, ok := command.Annotations[aliasExpansionAnnotation]
+	if !ok {
+		return command
+	}
+	args, err := shlex.Split(expansion)
+	if err != nil || len(args) == 0 {
+		return command
+	}
+	target, _, err := command.Root().Find(args)
+	if err != nil || target == nil {
+		return command
+	}
+	return target
 }

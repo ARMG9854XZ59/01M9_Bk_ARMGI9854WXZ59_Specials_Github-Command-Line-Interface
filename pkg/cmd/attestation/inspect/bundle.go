@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
-	"github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 )
 
 type workflow struct {
@@ -55,17 +54,27 @@ type AttestationDetail struct {
 	WorkflowID     string `json:"workflowId"`
 }
 
-func getOrgAndRepo(repoURL string) (string, string, error) {
-	after, found := strings.CutPrefix(repoURL, "https://github.com/")
-	if !found {
-		return "", "", fmt.Errorf("failed to get org and repo from %s", repoURL)
+func getOrgAndRepo(tenant, repoURL string) (string, string, error) {
+	var after string
+	var found bool
+	if tenant == "" {
+		after, found = strings.CutPrefix(repoURL, "https://github.com/")
+		if !found {
+			return "", "", fmt.Errorf("failed to get org and repo from %s", repoURL)
+		}
+	} else {
+		after, found = strings.CutPrefix(repoURL,
+			fmt.Sprintf("https://%s.ghe.com/", tenant))
+		if !found {
+			return "", "", fmt.Errorf("failed to get org and repo from %s", repoURL)
+		}
 	}
 
 	parts := strings.Split(after, "/")
 	return parts[0], parts[1], nil
 }
 
-func getAttestationDetail(attr api.Attestation) (AttestationDetail, error) {
+func getAttestationDetail(tenant string, attr api.Attestation) (AttestationDetail, error) {
 	envelope, err := attr.Bundle.Envelope()
 	if err != nil {
 		return AttestationDetail{}, fmt.Errorf("failed to get envelope from bundle: %v", err)
@@ -87,7 +96,7 @@ func getAttestationDetail(attr api.Attestation) (AttestationDetail, error) {
 		return AttestationDetail{}, fmt.Errorf("failed to unmarshal predicate: %v", err)
 	}
 
-	org, repo, err := getOrgAndRepo(predicate.BuildDefinition.ExternalParameters.Workflow.Repository)
+	org, repo, err := getOrgAndRepo(tenant, predicate.BuildDefinition.ExternalParameters.Workflow.Repository)
 	if err != nil {
 		return AttestationDetail{}, fmt.Errorf("failed to parse attestation content: %v", err)
 	}
@@ -99,30 +108,4 @@ func getAttestationDetail(attr api.Attestation) (AttestationDetail, error) {
 		RepositoryID:   predicate.BuildDefinition.InternalParameters.GitHub.RepositoryID,
 		WorkflowID:     predicate.RunDetails.Metadata.InvocationID,
 	}, nil
-}
-
-func getDetailsAsSlice(results []*verification.AttestationProcessingResult) ([][]string, error) {
-	details := make([][]string, len(results))
-
-	for i, result := range results {
-		detail, err := getAttestationDetail(*result.Attestation)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get attestation detail: %v", err)
-		}
-		details[i] = []string{detail.RepositoryName, detail.RepositoryID, detail.OrgName, detail.OrgID, detail.WorkflowID}
-	}
-	return details, nil
-}
-
-func getAttestationDetails(results []*verification.AttestationProcessingResult) ([]AttestationDetail, error) {
-	details := make([]AttestationDetail, len(results))
-
-	for i, result := range results {
-		detail, err := getAttestationDetail(*result.Attestation)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get attestation detail: %v", err)
-		}
-		details[i] = detail
-	}
-	return details, nil
 }

@@ -2,11 +2,15 @@ package list
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/cli/cli/v2/api"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 )
+
+var pullRequestSearchQualifierRE = regexp.MustCompile(`(?i)\b(?:is|type):(?:pr|pull-?request)\b`)
 
 func listIssues(client *api.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.IssuesAndTotalCount, error) {
 	var states []string
@@ -40,7 +44,7 @@ func listIssues(client *api.Client, repo ghrepo.Interface, filters prShared.Filt
 	}
 	`
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner":  repo.RepoOwner(),
 		"repo":   repo.RepoName(),
 		"states": states,
@@ -112,7 +116,20 @@ loop:
 	return &res, nil
 }
 
-func searchIssues(client *api.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.IssuesAndTotalCount, error) {
+func searchIssues(client *api.Client, detector fd.Detector, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.IssuesAndTotalCount, error) {
+	if pullRequestSearchQualifierRE.MatchString(filters.Search) {
+		return nil, fmt.Errorf("cannot use pull request search qualifiers with `gh issue list`; use `gh pr list` instead")
+	}
+
+	// TODO advancedIssueSearchCleanup
+	// We won't need feature detection when GHES 3.17 support ends, since
+	// the advanced issue search is the only available search backend for
+	// issues.
+	features, err := detector.SearchFeatures()
+	if err != nil {
+		return nil, err
+	}
+
 	fragments := fmt.Sprintf("fragment issue on Issue {%s}", api.IssueGraphQL(filters.Fields))
 	query := fragments +
 		`query IssueSearch($repo: String!, $owner: String!, $type: SearchType!, $limit: Int, $after: String, $query: String!) {
@@ -143,18 +160,29 @@ func searchIssues(client *api.Client, repo ghrepo.Interface, filters prShared.Fi
 		}
 	}
 
-	filters.Repo = ghrepo.FullName(repo)
-	filters.Entity = "issue"
-	q := prShared.SearchQueryBuild(filters)
-
 	perPage := min(limit, 100)
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner": repo.RepoOwner(),
 		"repo":  repo.RepoName(),
-		"type":  "ISSUE",
 		"limit": perPage,
-		"query": q,
+	}
+
+	filters.Repo = ghrepo.FullName(repo)
+	filters.Entity = "issue"
+
+	// TODO advancedIssueSearchCleanup
+	if features.AdvancedIssueSearchAPI {
+		variables["query"] = prShared.SearchQueryBuild(filters, true)
+		// TODO advancedIssueSearchCleanup
+		if features.AdvancedIssueSearchAPIOptIn {
+			variables["type"] = "ISSUE_ADVANCED"
+		} else {
+			variables["type"] = "ISSUE"
+		}
+	} else {
+		variables["query"] = prShared.SearchQueryBuild(filters, false)
+		variables["type"] = "ISSUE"
 	}
 
 	ic := api.IssuesAndTotalCount{SearchCapped: limit > 1000}
@@ -188,11 +216,4 @@ loop:
 	}
 
 	return &ic, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

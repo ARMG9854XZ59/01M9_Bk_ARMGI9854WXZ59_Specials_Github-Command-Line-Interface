@@ -6,25 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/keyring"
 	o "github.com/cli/cli/v2/pkg/option"
-	ghAuth "github.com/cli/go-gh/v2/pkg/auth"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	ghConfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
+// Important: some of the following configuration settings are used outside of `cli/cli`,
+// they are defined here to avoid `cli/cli` being changed unexpectedly.
 const (
+	accessibleColorsKey   = "accessible_colors" // used by cli/go-gh to enable the use of customizable, accessible 4-bit colors.
+	accessiblePrompterKey = "accessible_prompter"
 	aliasesKey            = "aliases"
-	browserKey            = "browser"
-	editorKey             = "editor"
+	browserKey            = "browser" // used by cli/go-gh to open URLs in web browsers
+	clipboardKey          = "clipboard"
+	colorLabelsKey        = "color_labels"
+	apiHostKey            = "api_host" // used by cli/go-gh to redirect API requests for a host
+	editorKey             = "editor"   // used by cli/go-gh to open interactive text editor
 	gitProtocolKey        = "git_protocol"
-	hostsKey              = "hosts"
+	hostsKey              = "hosts" // used by cli/go-gh to locate authenticated host tokens
 	httpUnixSocketKey     = "http_unix_socket"
-	oauthTokenKey         = "oauth_token"
+	oauthTokenKey         = "oauth_token" // used by cli/go-gh to locate authenticated host tokens
 	pagerKey              = "pager"
 	promptKey             = "prompt"
 	preferEditorPromptKey = "prefer_editor_prompt"
+	spinnerKey            = "spinner"
+	telemetryKey          = "telemetry"
 	userKey               = "user"
 	usersKey              = "users"
 	versionKey            = "version"
@@ -108,9 +118,29 @@ func (c *cfg) Authentication() gh.AuthConfig {
 	return &AuthConfig{cfg: c.cfg}
 }
 
+func (c *cfg) AccessibleColors(hostname string) gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault(hostname, accessibleColorsKey).Unwrap()
+}
+
+func (c *cfg) AccessiblePrompter(hostname string) gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault(hostname, accessiblePrompterKey).Unwrap()
+}
+
 func (c *cfg) Browser(hostname string) gh.ConfigEntry {
 	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
 	return c.GetOrDefault(hostname, browserKey).Unwrap()
+}
+
+func (c *cfg) Clipboard() gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault("", clipboardKey).Unwrap()
+}
+
+func (c *cfg) ColorLabels(hostname string) gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault(hostname, colorLabelsKey).Unwrap()
 }
 
 func (c *cfg) Editor(hostname string) gh.ConfigEntry {
@@ -141,6 +171,16 @@ func (c *cfg) Prompt(hostname string) gh.ConfigEntry {
 func (c *cfg) PreferEditorPrompt(hostname string) gh.ConfigEntry {
 	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
 	return c.GetOrDefault(hostname, preferEditorPromptKey).Unwrap()
+}
+
+func (c *cfg) Spinner(hostname string) gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault(hostname, spinnerKey).Unwrap()
+}
+
+func (c *cfg) Telemetry() gh.ConfigEntry {
+	// Intentionally panic if there is no user provided value or default value (which would be a programmer error)
+	return c.GetOrDefault("", telemetryKey).Unwrap()
 }
 
 func (c *cfg) Version() o.Option[string] {
@@ -199,6 +239,18 @@ type AuthConfig struct {
 	tokenOverride       func(string) (string, string)
 }
 
+// ActiveTokenType reports what kind of credential the active token is, so a
+// caller that only needs to know that can avoid handling the token.
+func (c *AuthConfig) ActiveTokenType(hostname string) gh.TokenType {
+	token, _ := c.ActiveToken(hostname)
+	for _, tokenType := range gh.TokenTypes {
+		if strings.HasPrefix(token, string(tokenType)) {
+			return tokenType
+		}
+	}
+	return gh.TokenTypeUnknown
+}
+
 // ActiveToken will retrieve the active auth token for the given hostname,
 // searching environment variables, plain text config, and
 // lastly encrypted storage.
@@ -206,15 +258,31 @@ func (c *AuthConfig) ActiveToken(hostname string) (string, string) {
 	if c.tokenOverride != nil {
 		return c.tokenOverride(hostname)
 	}
-	token, source := ghAuth.TokenFromEnvOrConfig(hostname)
+	token, source := ghauth.TokenFromEnvOrConfig(hostname)
 	if token == "" {
+		var user string
 		var err error
-		token, err = c.TokenFromKeyring(hostname)
+		if user, err = c.ActiveUser(hostname); err == nil {
+			token, err = c.TokenFromKeyringForUser(hostname, user)
+		}
+		if err != nil {
+			// We should generally be able to find a token for the active user,
+			// but in some cases such as if the keyring was set up in a very old
+			// version of the CLI, it may only have a unkeyed token, so fallback
+			// to it.
+			token, err = c.TokenFromKeyring(hostname)
+		}
 		if err == nil {
 			source = "keyring"
 		}
 	}
 	return token, source
+}
+
+// HasActiveToken returns true when a token for the hostname is present.
+func (c *AuthConfig) HasActiveToken(hostname string) bool {
+	token, _ := c.ActiveToken(hostname)
+	return token != ""
 }
 
 // HasEnvToken returns true when a token has been specified in an
@@ -234,7 +302,7 @@ func (c *AuthConfig) HasEnvToken() bool {
 	// It has to use a hostname that is not going to be found in the hosts so that it
 	// can guarantee that tokens will only be returned from a set env var.
 	// Discussed here, but maybe worth revisiting: https://github.com/cli/cli/pull/7169#discussion_r1136979033
-	token, _ := ghAuth.TokenFromEnvOrConfig(hostname)
+	token, _ := ghauth.TokenFromEnvOrConfig(hostname)
 	return token != ""
 }
 
@@ -276,7 +344,50 @@ func (c *AuthConfig) Hosts() []string {
 	if c.hostsOverride != nil {
 		return c.hostsOverride()
 	}
-	return ghAuth.KnownHosts()
+	return ghauth.KnownHosts()
+}
+
+// APIHostForHost returns the api_host configured for host, reporting false when
+// the host has no api_host set. It is the inverse of HostForAPIHost.
+func (c *AuthConfig) APIHostForHost(host string) (string, bool) {
+	if host == "" || c.cfg == nil {
+		return "", false
+	}
+	configured, err := c.cfg.Get([]string{hostsKey, host, apiHostKey})
+	if err != nil || configured == "" {
+		return "", false
+	}
+	return configured, true
+}
+
+// HostForAPIHost returns the configured host whose api_host points at apiHost,
+// reporting false when no host claims it.
+//
+// go-gh sends API requests for a host to that host's api_host, which is a
+// hostname gh is not otherwise logged in to. Callers that resolve credentials
+// from a request URL need this to get back to the host the request is really
+// for. It answers only the mapping question; deciding whether a given lookup
+// should honour api_host at all is the caller's business, since api_host covers
+// API traffic and not, say, git operations.
+//
+// A misconfiguration where several hosts share one api_host resolves to the
+// first match in lexical Hosts order.
+func (c *AuthConfig) HostForAPIHost(apiHost string) (string, bool) {
+	if apiHost == "" {
+		return "", false
+	}
+	hosts := slices.Clone(c.Hosts())
+	slices.Sort(hosts)
+	for _, host := range hosts {
+		configured, err := c.cfg.Get([]string{hostsKey, host, apiHostKey})
+		if err != nil || configured == "" {
+			continue
+		}
+		if strings.EqualFold(configured, apiHost) {
+			return host, true
+		}
+	}
+	return "", false
 }
 
 // SetHosts will override any hosts resolution and return the given
@@ -291,7 +402,7 @@ func (c *AuthConfig) DefaultHost() (string, string) {
 	if c.defaultHostOverride != nil {
 		return c.defaultHostOverride()
 	}
-	return ghAuth.DefaultHost()
+	return ghauth.DefaultHost()
 }
 
 // SetDefaultHost will override any host resolution and return the given
@@ -522,21 +633,55 @@ pager:
 # Aliases allow you to create nicknames for gh commands
 aliases:
   co: pr checkout
-# The path to a unix socket through which send HTTP connections. If blank, HTTP traffic will be handled by net/http.DefaultTransport.
+# The path to a unix socket through which to send HTTP connections. If blank, HTTP traffic will be handled by net/http.DefaultTransport.
 http_unix_socket:
 # What web browser gh should use when opening URLs. If blank, will refer to environment.
 browser:
+# Whether to copy one-time OAuth device codes to the clipboard. Supported values: enabled, disabled
+clipboard: enabled
+# Whether to display labels using their RGB hex color codes in terminals that support truecolor. Supported values: enabled, disabled
+color_labels: disabled
+# Whether customizable, 4-bit accessible colors should be used. Supported values: enabled, disabled
+accessible_colors: disabled
+# Whether an accessible prompter should be used. Supported values: enabled, disabled
+accessible_prompter: disabled
+# Whether to use an animated spinner as a progress indicator. If disabled, a textual progress indicator is used instead. Supported values: enabled, disabled
+spinner: enabled
 `
 
+// ConfigScope controls whether a configuration option can be set globally, per host, or both.
+type ConfigScope int
+
+const (
+	// ConfigScopeGlobalOrHost allows an option to be set globally or for a specific host.
+	ConfigScopeGlobalOrHost ConfigScope = iota
+	// ConfigScopeGlobalOnly allows an option to be set only at the global level.
+	ConfigScopeGlobalOnly
+	// ConfigScopeHostOnly requires an option to be set for a specific host.
+	ConfigScopeHostOnly
+)
+
+// ConfigOption describes a supported configuration key.
 type ConfigOption struct {
 	Key           string
 	Description   string
 	DefaultValue  string
 	AllowedValues []string
+	Scope         ConfigScope
 	CurrentValue  func(c gh.Config, hostname string) string
 }
 
 var Options = []ConfigOption{
+	{
+		Key:          apiHostKey,
+		Description:  "experimental: the hostname to use when making API requests for a GitHub host. Note: this is not a security boundary and requests to the canonical host will remain authenticated",
+		DefaultValue: "",
+		Scope:        ConfigScopeHostOnly,
+		CurrentValue: func(c gh.Config, hostname string) string {
+			apiHost, _ := c.Authentication().APIHostForHost(hostname)
+			return apiHost
+		},
+	},
 	{
 		Key:           gitProtocolKey,
 		Description:   "the protocol to use for git clone and push operations",
@@ -594,6 +739,61 @@ var Options = []ConfigOption{
 		DefaultValue: "",
 		CurrentValue: func(c gh.Config, hostname string) string {
 			return c.Browser(hostname).Value
+		},
+	},
+	{
+		Key:           clipboardKey,
+		Description:   "whether to copy one-time OAuth device codes to the clipboard",
+		DefaultValue:  "enabled",
+		AllowedValues: []string{"enabled", "disabled"},
+		Scope:         ConfigScopeGlobalOnly,
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.Clipboard().Value
+		},
+	},
+	{
+		Key:           colorLabelsKey,
+		Description:   "whether to display labels using their RGB hex color codes in terminals that support truecolor",
+		DefaultValue:  "disabled",
+		AllowedValues: []string{"enabled", "disabled"},
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.ColorLabels(hostname).Value
+		},
+	},
+	{
+		Key:           accessibleColorsKey,
+		Description:   "whether customizable, 4-bit accessible colors should be used",
+		DefaultValue:  "disabled",
+		AllowedValues: []string{"enabled", "disabled"},
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.AccessibleColors(hostname).Value
+		},
+	},
+	{
+		Key:           accessiblePrompterKey,
+		Description:   "whether an accessible prompter should be used",
+		DefaultValue:  "disabled",
+		AllowedValues: []string{"enabled", "disabled"},
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.AccessiblePrompter(hostname).Value
+		},
+	},
+	{
+		Key:           spinnerKey,
+		Description:   "whether to use an animated spinner as a progress indicator",
+		DefaultValue:  "enabled",
+		AllowedValues: []string{"enabled", "disabled"},
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.Spinner(hostname).Value
+		},
+	},
+	{
+		Key:           telemetryKey,
+		Description:   "whether telemetry is enabled, disabled, or logging",
+		DefaultValue:  "enabled",
+		AllowedValues: []string{"enabled", "disabled", "log"},
+		CurrentValue: func(c gh.Config, hostname string) string {
+			return c.Telemetry().Value
 		},
 	},
 }

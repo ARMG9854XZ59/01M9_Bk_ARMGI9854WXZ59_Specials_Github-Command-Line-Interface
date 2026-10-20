@@ -54,6 +54,33 @@
           ],
           "totalcount": 5
         },
+        "projectitems": {
+          "totalCount": 2,
+          "nodes": [
+            {
+              "id": "NO_STATUS_ITEM",
+              "project": {
+                "id": "PROJECT1",
+                "title": "v2 Project 1"
+              },
+              "status": {
+                "optionId": "",
+                "name": ""
+              }
+            },
+            {
+              "id": "DONE_STATUS_ITEM",
+              "project": {
+                "id": "PROJECT2",
+                "title": "v2 Project 2"
+              },
+              "status": {
+                "optionId": "PROJECTITEMFIELD1",
+                "name": "Done"
+              }
+            }
+          ]
+        },
         "projectcards": {
           "nodes": [
             {

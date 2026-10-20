@@ -56,16 +56,16 @@ func NewCmdReview(f *cmdutil.Factory, runF func(*ReviewOptions) error) *cobra.Co
 			Without an argument, the pull request that belongs to the current branch is reviewed.
 		`),
 		Example: heredoc.Doc(`
-			# approve the pull request of the current branch
+			# Approve the pull request of the current branch
 			$ gh pr review --approve
 
-			# leave a review comment for the current branch
+			# Leave a review comment for the current branch
 			$ gh pr review --comment -b "interesting"
 
-			# add a review for a specific pull request
+			# Add a review for a specific pull request
 			$ gh pr review 123
 
-			# request changes on a specific pull request
+			# Request changes on a specific pull request
 			$ gh pr review 123 -r -b "needs more ASCII art"
 		`),
 		Args: cobra.MaximumNArgs(1),
@@ -191,7 +191,7 @@ func reviewRun(opts *ReviewOptions) error {
 
 	switch reviewData.State {
 	case api.ReviewComment:
-		fmt.Fprintf(opts.IO.ErrOut, "%s Reviewed pull request %s#%d\n", cs.Gray("-"), ghrepo.FullName(baseRepo), pr.Number)
+		fmt.Fprintf(opts.IO.ErrOut, "%s Reviewed pull request %s#%d\n", cs.Muted("-"), ghrepo.FullName(baseRepo), pr.Number)
 	case api.ReviewApprove:
 		fmt.Fprintf(opts.IO.ErrOut, "%s Approved pull request %s#%d\n", cs.SuccessIcon(), ghrepo.FullName(baseRepo), pr.Number)
 	case api.ReviewRequestChanges:

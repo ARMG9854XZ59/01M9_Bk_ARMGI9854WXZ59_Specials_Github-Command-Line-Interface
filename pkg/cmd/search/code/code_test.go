@@ -6,6 +6,10 @@ import (
 	"testing"
 
 	"github.com/cli/cli/v2/internal/browser"
+	"github.com/cli/cli/v2/internal/config"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
+	"github.com/cli/cli/v2/internal/gh"
+	ghmock "github.com/cli/cli/v2/internal/gh/mock"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/search"
@@ -146,6 +150,7 @@ func TestCodeRun(t *testing.T) {
 		wantErr    bool
 		wantStderr string
 		wantStdout string
+		wantBrowse string
 	}{
 		{
 			name: "displays results tty",
@@ -294,8 +299,7 @@ func TestCodeRun(t *testing.T) {
 		{
 			name: "opens browser for web mode tty",
 			opts: &CodeOptions{
-				Browser: &browser.Stub{},
-				Query:   query,
+				Query: query,
 				Searcher: &search.SearcherMock{
 					URLFunc: func(query search.Query) string {
 						return "https://github.com/search?type=code&q=map+repo%3Acli%2Fcli"
@@ -304,13 +308,13 @@ func TestCodeRun(t *testing.T) {
 				WebMode: true,
 			},
 			tty:        true,
-			wantStderr: "Opening github.com/search in your browser.\n",
+			wantStderr: "Opening https://github.com/search in your browser.\n",
+			wantBrowse: "https://github.com/search?type=code&q=map+repo%3Acli%2Fcli",
 		},
 		{
 			name: "opens browser for web mode notty",
 			opts: &CodeOptions{
-				Browser: &browser.Stub{},
-				Query:   query,
+				Query: query,
 				Searcher: &search.SearcherMock{
 					URLFunc: func(query search.Query) string {
 						return "https://github.com/search?type=code&q=map+repo%3Acli%2Fcli"
@@ -318,6 +322,70 @@ func TestCodeRun(t *testing.T) {
 				},
 				WebMode: true,
 			},
+			wantBrowse: "https://github.com/search?type=code&q=map+repo%3Acli%2Fcli",
+		},
+		{
+			name: "converts filename and extension qualifiers for github.com web search",
+			opts: &CodeOptions{
+				Config: func() (gh.Config, error) { return config.NewMockConfig(), nil },
+				Query: search.Query{
+					Keywords: []string{"map"},
+					Kind:     "code",
+					Limit:    30,
+					Qualifiers: search.Qualifiers{
+						Filename:  "testing",
+						Extension: "go",
+					},
+				},
+				Searcher: search.NewSearcher(nil, "github.com", &fd.DisabledDetectorMock{}),
+				WebMode:  true,
+			},
+			wantBrowse: "https://github.com/search?q=map+path%3Atesting.go&type=code",
+		},
+		{
+			name: "properly handles extension with dot prefix when converting to path qualifier",
+			opts: &CodeOptions{
+				Config: func() (gh.Config, error) { return config.NewMockConfig(), nil },
+				Query: search.Query{
+					Keywords: []string{"map"},
+					Kind:     "code",
+					Limit:    30,
+					Qualifiers: search.Qualifiers{
+						Filename:  "testing",
+						Extension: ".cpp",
+					},
+				},
+				Searcher: search.NewSearcher(nil, "github.com", &fd.DisabledDetectorMock{}),
+				WebMode:  true,
+			},
+			wantBrowse: "https://github.com/search?q=map+path%3Atesting.cpp&type=code",
+		},
+		{
+			name: "does not convert filename and extension qualifiers for GHES web search",
+			opts: &CodeOptions{
+				Config: func() (gh.Config, error) {
+					cfg := &ghmock.ConfigMock{
+						AuthenticationFunc: func() gh.AuthConfig {
+							authCfg := &config.AuthConfig{}
+							authCfg.SetDefaultHost("example.com", "GH_HOST")
+							return authCfg
+						},
+					}
+					return cfg, nil
+				},
+				Query: search.Query{
+					Keywords: []string{"map"},
+					Kind:     "code",
+					Limit:    30,
+					Qualifiers: search.Qualifiers{
+						Filename:  "testing",
+						Extension: "go",
+					},
+				},
+				Searcher: search.NewSearcher(nil, "example.com", &fd.DisabledDetectorMock{}),
+				WebMode:  true,
+			},
+			wantBrowse: "https://example.com/search?q=map+extension%3Ago+filename%3Atesting&type=code",
 		},
 	}
 
@@ -327,6 +395,8 @@ func TestCodeRun(t *testing.T) {
 		ios.SetStdoutTTY(tt.tty)
 		ios.SetStderrTTY(tt.tty)
 		tt.opts.IO = ios
+		browser := &browser.Stub{}
+		tt.opts.Browser = browser
 		t.Run(tt.name, func(t *testing.T) {
 			err := codeRun(tt.opts)
 			if tt.wantErr {
@@ -337,6 +407,64 @@ func TestCodeRun(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantStdout, stdout.String())
 			assert.Equal(t, tt.wantStderr, stderr.String())
+			browser.Verify(t, tt.wantBrowse)
+		})
+	}
+}
+
+func TestFormatMatch(t *testing.T) {
+	const (
+		hl    = "\x1b[0;30;43m"
+		reset = "\x1b[0m"
+	)
+	tests := []struct {
+		name     string
+		fragment string
+		matches  []search.Match
+		want     []string
+	}{
+		{
+			name:     "match ending mid-line",
+			fragment: "foo bar baz",
+			matches:  []search.Match{{Indices: []int{4, 7}}},
+			want:     []string{"foo " + hl + "bar" + reset + " baz"},
+		},
+		{
+			name:     "match ending at newline",
+			fragment: "foo bar\nbaz",
+			matches:  []search.Match{{Indices: []int{4, 7}}},
+			want:     []string{"foo " + hl + "bar" + reset},
+		},
+		{
+			name:     "match ending at end of fragment",
+			fragment: "foo bar",
+			matches:  []search.Match{{Indices: []int{4, 7}}},
+			want:     []string{"foo " + hl + "bar" + reset},
+		},
+		{
+			name:     "match spanning newline",
+			fragment: "foo bar\nbaz qux",
+			matches:  []search.Match{{Indices: []int{4, 11}}},
+			want:     []string{"foo " + hl + "bar" + reset},
+		},
+		{
+			name:     "closed match is not reset again at newline",
+			fragment: "foo bar  \nbaz",
+			matches:  []search.Match{{Indices: []int{0, 3}}},
+			want:     []string{hl + "foo" + reset + " bar  "},
+		},
+		{
+			name:     "matches on multiple lines",
+			fragment: "foo\nbar\nbaz",
+			matches:  []search.Match{{Indices: []int{0, 3}}, {Indices: []int{8, 11}}},
+			want:     []string{hl + "foo" + reset, hl + "baz" + reset},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ios, _, _, _ := iostreams.Test()
+			ios.SetColorEnabled(true)
+			assert.Equal(t, tt.want, formatMatch(tt.fragment, tt.matches, ios))
 		})
 	}
 }

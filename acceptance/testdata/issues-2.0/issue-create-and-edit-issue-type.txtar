@@ -1,0 +1,26 @@
+# requires-user-capability: false
+
+# Create a repository with a file so it has a default branch
+fixture-repo shared REPO
+env ISSUE_PREFIX=${SCRIPT_NAME}-${RANDOM_STRING}
+
+# Target the fixture repository
+env GH_REPO=$ORG/$REPO
+
+# Create an issue with --type
+exec gh issue create --title $ISSUE_PREFIX-with-type --body '' --type 'Bug'
+stdout2env ISSUE_URL
+
+# Confirm the type stuck
+exec gh issue view $ISSUE_URL --json issueType --jq .issueType.name
+stdout '^Bug$'
+
+# Clear the type with --remove-type
+exec gh issue edit $ISSUE_URL --remove-type
+exec gh issue view $ISSUE_URL --json issueType --jq '.issueType // "null"'
+stdout '^null$'
+
+# Set the type back with --type
+exec gh issue edit $ISSUE_URL --type 'Bug'
+exec gh issue view $ISSUE_URL --json issueType --jq .issueType.name
+stdout '^Bug$'

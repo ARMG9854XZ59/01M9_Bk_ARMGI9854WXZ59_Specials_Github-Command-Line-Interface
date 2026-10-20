@@ -40,8 +40,8 @@ func NewCmdCreateItem(f *cmdutil.Factory, runF func(config createItemConfig) err
 		Short: "Create a draft issue item in a project",
 		Use:   "item-create [<number>]",
 		Example: heredoc.Doc(`
-			# create a draft issue in the current user's project "1"
-			gh project item-create 1 --owner "@me" --title "new item" --body "new item body"
+			# Create a draft issue in the current user's project "1"
+			$ gh project item-create 1 --owner "@me" --title "new item" --body "new item body"
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -109,10 +109,10 @@ func runCreateItem(config createItemConfig) error {
 	return printResults(config, query.CreateProjectDraftItem.ProjectV2Item)
 }
 
-func createDraftIssueArgs(config createItemConfig) (*createProjectDraftItemMutation, map[string]interface{}) {
-	return &createProjectDraftItemMutation{}, map[string]interface{}{
+func createDraftIssueArgs(config createItemConfig) (*createProjectDraftItemMutation, map[string]any) {
+	return &createProjectDraftItemMutation{}, map[string]any{
 		"input": githubv4.AddProjectV2DraftIssueInput{
-			Body:      githubv4.NewString(githubv4.String(config.opts.body)),
+			Body:      new(githubv4.String(config.opts.body)),
 			ProjectID: githubv4.ID(config.opts.projectID),
 			Title:     githubv4.String(config.opts.title),
 		},

@@ -17,6 +17,14 @@ func StateTitleWithColor(cs *iostreams.ColorScheme, pr api.PullRequest) string {
 	return prStateColorFunc(text.Title(pr.State))
 }
 
+func PrStateWithDraft(pr *api.PullRequest) string {
+	if pr.IsDraft && pr.State == "OPEN" {
+		return "DRAFT"
+	}
+
+	return pr.State
+}
+
 func ColorForPRState(pr api.PullRequest) string {
 	switch pr.State {
 	case "OPEN":
@@ -52,7 +60,7 @@ func PrintHeader(io *iostreams.IOStreams, s string) {
 }
 
 func PrintMessage(io *iostreams.IOStreams, s string) {
-	fmt.Fprintln(io.Out, io.ColorScheme().Gray(s))
+	fmt.Fprintln(io.Out, io.ColorScheme().Muted(s))
 }
 
 func ListNoResults(repoName string, itemName string, hasFilters bool) error {
@@ -75,7 +83,7 @@ func ListHeader(repoName string, itemName string, matchCount int, totalMatchCoun
 }
 
 func PrCheckStatusSummaryWithColor(cs *iostreams.ColorScheme, checks api.PullRequestChecksStatus) string {
-	var summary = cs.Gray("No checks")
+	var summary = cs.Muted("No checks")
 	if checks.Total > 0 {
 		if checks.Failing > 0 {
 			if checks.Failing == checks.Total {

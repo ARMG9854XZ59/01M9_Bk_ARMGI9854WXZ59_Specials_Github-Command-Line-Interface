@@ -37,6 +37,7 @@ type ListOptions struct {
 	Mention      string
 	Milestone    string
 	Search       string
+	IssueType    string
 	WebMode      bool
 	Exporter     cmdutil.Exporter
 
@@ -58,18 +59,27 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List issues in a repository",
-		Long: heredoc.Doc(`
-			List issues in a GitHub repository.
+		// TODO advancedIssueSearchCleanup
+		// Update the links and remove the mention at GHES 3.17 version.
+		Long: heredoc.Docf(`
+			List issues in a GitHub repository. By default, this only lists open issues.
 
 			The search query syntax is documented here:
 			<https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests>
-		`),
+
+			On supported GitHub hosts, advanced issue search syntax can be used in the
+			%[1]s--search%[1]s query. For more information about advanced issue search, see:
+			<https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests#building-advanced-filters-for-issues>
+		`, "`"),
 		Example: heredoc.Doc(`
 			$ gh issue list --label "bug" --label "help wanted"
 			$ gh issue list --author monalisa
+			$ gh issue list --app dependabot
 			$ gh issue list --assignee "@me"
 			$ gh issue list --milestone "The big 1.0"
 			$ gh issue list --search "error no:assignee sort:created-asc"
+			$ gh issue list --state all
+			$ gh issue list --type Bug
 		`),
 		Aliases: []string{"ls"},
 		Args:    cmdutil.NoArgsQuoteReminder,
@@ -101,11 +111,12 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd.Flags().StringSliceVarP(&opts.Labels, "label", "l", nil, "Filter by label")
 	cmdutil.StringEnumFlag(cmd, &opts.State, "state", "s", "open", []string{"open", "closed", "all"}, "Filter by state")
 	cmd.Flags().IntVarP(&opts.LimitResults, "limit", "L", 30, "Maximum number of issues to fetch")
-	cmd.Flags().StringVarP(&opts.Author, "author", "A", "", "Filter by author")
+	cmd.Flags().StringVarP(&opts.Author, "author", "A", "", "Filter by author (use --app to filter by a GitHub App)")
 	cmd.Flags().StringVar(&appAuthor, "app", "", "Filter by GitHub App author")
 	cmd.Flags().StringVar(&opts.Mention, "mention", "", "Filter by mention")
 	cmd.Flags().StringVarP(&opts.Milestone, "milestone", "m", "", "Filter by milestone number or title")
 	cmd.Flags().StringVarP(&opts.Search, "search", "S", "", "Search issues with `query`")
+	cmd.Flags().StringVar(&opts.IssueType, "type", "", "Filter by issue type `name`")
 	cmdutil.AddJSONFlags(cmd, &opts.Exporter, api.IssueFields)
 
 	return cmd
@@ -140,14 +151,7 @@ func listRun(opts *ListOptions) error {
 		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
 		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
 	}
-	features, err := opts.Detector.IssueFeatures()
-	if err != nil {
-		return err
-	}
-	fields := defaultFields
-	if features.StateReason {
-		fields = append(defaultFields, "stateReason")
-	}
+	fields := append(defaultFields, "stateReason")
 
 	filterOptions := prShared.FilterOptions{
 		Entity:    "issue",
@@ -158,14 +162,28 @@ func listRun(opts *ListOptions) error {
 		Mention:   opts.Mention,
 		Milestone: opts.Milestone,
 		Search:    opts.Search,
+		IssueType: opts.IssueType,
 		Fields:    fields,
 	}
 
 	isTerminal := opts.IO.IsStdoutTTY()
 
 	if opts.WebMode {
+		// TODO advancedIssueSearchCleanup
+		// We won't need feature detection when GHES 3.17 support ends, since
+		// the advanced issue search is the only available search backend for
+		// issues, and the GUI (i.e. Issues tab of repos) already supports the
+		// advanced syntax.
+		searchFeatures, err := opts.Detector.SearchFeatures()
+		if err != nil {
+			return err
+		}
+
 		issueListURL := ghrepo.GenerateRepoURL(baseRepo, "issues")
-		openURL, err := prShared.ListURLWithQuery(issueListURL, filterOptions)
+
+		// Note that if the advanced issue search API is available, the syntax is
+		// also supported in the Issues tab.
+		openURL, err := prShared.ListURLWithQuery(issueListURL, filterOptions, searchFeatures.AdvancedIssueSearchAPI)
 		if err != nil {
 			return err
 		}
@@ -180,7 +198,7 @@ func listRun(opts *ListOptions) error {
 		filterOptions.Fields = opts.Exporter.Fields()
 	}
 
-	listResult, err := issueList(httpClient, baseRepo, filterOptions, opts.LimitResults)
+	listResult, err := issueList(httpClient, opts.Detector, baseRepo, filterOptions, opts.LimitResults)
 	if err != nil {
 		return err
 	}
@@ -211,10 +229,10 @@ func listRun(opts *ListOptions) error {
 	return nil
 }
 
-func issueList(client *http.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.IssuesAndTotalCount, error) {
+func issueList(client *http.Client, detector fd.Detector, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.IssuesAndTotalCount, error) {
 	apiClient := api.NewClientFromHTTP(client)
 
-	if filters.Search != "" || len(filters.Labels) > 0 || filters.Milestone != "" {
+	if filters.Search != "" || len(filters.Labels) > 0 || filters.Milestone != "" || filters.IssueType != "" {
 		if milestoneNumber, err := strconv.ParseInt(filters.Milestone, 10, 32); err == nil {
 			milestone, err := milestoneByNumber(client, repo, int32(milestoneNumber))
 			if err != nil {
@@ -223,7 +241,7 @@ func issueList(client *http.Client, repo ghrepo.Interface, filters prShared.Filt
 			filters.Milestone = milestone.Title
 		}
 
-		return searchIssues(apiClient, repo, filters, limit)
+		return searchIssues(apiClient, detector, repo, filters, limit)
 	}
 
 	var err error
@@ -251,7 +269,7 @@ func milestoneByNumber(client *http.Client, repo ghrepo.Interface, number int32)
 		} `graphql:"repository(owner: $owner, name: $name)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner":  githubv4.String(repo.RepoOwner()),
 		"name":   githubv4.String(repo.RepoName()),
 		"number": githubv4.Int(number),

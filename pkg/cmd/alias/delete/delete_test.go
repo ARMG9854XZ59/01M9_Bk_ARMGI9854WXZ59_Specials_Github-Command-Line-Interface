@@ -161,7 +161,10 @@ func TestDeleteRun(t *testing.T) {
 			ios.SetStderrTTY(tt.isTTY)
 			tt.opts.IO = ios
 
-			cfg := config.NewFromString(tt.config)
+			cfg := config.NewMockConfigFromString(tt.config)
+			cfg.WriteFunc = func() error {
+				return nil
+			}
 			tt.opts.Config = func() (gh.Config, error) {
 				return cfg, nil
 			}

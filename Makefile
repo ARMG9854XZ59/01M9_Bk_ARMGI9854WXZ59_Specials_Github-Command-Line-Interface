@@ -33,15 +33,28 @@ manpages: script/build$(EXE)
 
 .PHONY: completions
 completions: bin/gh$(EXE)
-	mkdir -p ./share/bash-completion/completions ./share/fish/vendor_completions.d ./share/zsh/site-functions
+	mkdir -p ./share/bash-completion/completions ./share/fish/vendor_completions.d ./share/zsh/site-functions ./share/zsh/vendor-completions
 	bin/gh$(EXE) completion -s bash > ./share/bash-completion/completions/gh
 	bin/gh$(EXE) completion -s fish > ./share/fish/vendor_completions.d/gh.fish
 	bin/gh$(EXE) completion -s zsh > ./share/zsh/site-functions/_gh
+	# On Debian/Ubuntu the default zsh fpath does not include /usr/share/zsh/site-functions
+	# but does include /usr/share/zsh/vendor-completions, so we ship both paths in our
+	# .deb and .rpm packages. See https://github.com/cli/cli/issues/13166
+	cp ./share/zsh/site-functions/_gh ./share/zsh/vendor-completions/_gh
 
-# just a convenience task around `go test`
+.PHONY: lint
+lint:
+	golangci-lint run ./...
+
+# just convenience tasks around `go test`
 .PHONY: test
 test:
 	go test ./...
+
+# For more information, see https://github.com/cli/cli/blob/trunk/acceptance/README.md
+.PHONY: acceptance
+acceptance:
+	go test -tags acceptance ./acceptance
 
 ## Site-related tasks are exclusively intended for use by the GitHub CLI team and for our release automation.
 
@@ -69,7 +82,7 @@ endif
 ## Install/uninstall tasks are here for use on *nix platform. On Windows, there is no equivalent.
 
 DESTDIR :=
-prefix  := /usr/local
+prefix  ?= /usr/local
 bindir  := ${prefix}/bin
 datadir := ${prefix}/share
 mandir  := ${datadir}/man
@@ -101,3 +114,11 @@ ifndef VERSION
 endif
 	./script/release --local "$(VERSION)" --platform macos
 	./script/pkgmacos $(VERSION)
+
+.PHONY: licenses
+licenses:
+	./script/licenses $$(go env GOOS) $$(go env GOARCH)
+
+.PHONY: licenses-check
+licenses-check:
+	./script/licenses --check

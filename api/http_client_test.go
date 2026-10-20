@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -18,15 +21,17 @@ import (
 
 func TestNewHTTPClient(t *testing.T) {
 	type args struct {
-		config         tokenGetter
-		appVersion     string
-		logVerboseHTTP bool
+		config             config
+		appVersion         string
+		invokingAgent      string
+		logVerboseHTTP     bool
+		skipDefaultHeaders bool
 	}
 	tests := []struct {
 		name       string
 		args       args
 		host       string
-		wantHeader map[string]string
+		wantHeader map[string][]string
 		wantStderr string
 	}{
 		{
@@ -37,10 +42,11 @@ func TestNewHTTPClient(t *testing.T) {
 				logVerboseHTTP: false,
 			},
 			host: "github.com",
-			wantHeader: map[string]string{
-				"authorization": "token MYTOKEN",
-				"user-agent":    "GitHub CLI v1.2.3",
-				"accept":        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+			wantHeader: map[string][]string{
+				"authorization":        {"token MYTOKEN"},
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
 			},
 			wantStderr: "",
 		},
@@ -51,10 +57,66 @@ func TestNewHTTPClient(t *testing.T) {
 				appVersion: "v1.2.3",
 			},
 			host: "example.com",
-			wantHeader: map[string]string{
-				"authorization": "token GHETOKEN",
-				"user-agent":    "GitHub CLI v1.2.3",
-				"accept":        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+			wantHeader: map[string][]string{
+				"authorization":        {"token GHETOKEN"},
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
+			},
+			wantStderr: "",
+		},
+		{
+			name: "api_host is sent the token of the host it stands in for",
+			args: args{
+				config: tinyConfig{
+					"github.com:oauth_token":    "MYTOKEN",
+					"api_host:gateway.internal": "github.com",
+				},
+				appVersion: "v1.2.3",
+			},
+			host: "gateway.internal",
+			wantHeader: map[string][]string{
+				"authorization":        {"token MYTOKEN"},
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
+			},
+			wantStderr: "",
+		},
+		{
+			name: "a host with its own token is unaffected by an api_host mapping",
+			args: args{
+				config: tinyConfig{
+					"github.com:oauth_token":       "MYTOKEN",
+					"gateway.internal:oauth_token": "OWNTOKEN",
+					"api_host:gateway.internal":    "github.com",
+				},
+				appVersion: "v1.2.3",
+			},
+			host: "gateway.internal",
+			wantHeader: map[string][]string{
+				"authorization":        {"token OWNTOKEN"},
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
+			},
+			wantStderr: "",
+		},
+		{
+			name: "an unmapped host is still sent no token",
+			args: args{
+				config: tinyConfig{
+					"github.com:oauth_token":    "MYTOKEN",
+					"api_host:gateway.internal": "github.com",
+				},
+				appVersion: "v1.2.3",
+			},
+			host: "elsewhere.internal",
+			wantHeader: map[string][]string{
+				"authorization":        nil, // should not be set
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
 			},
 			wantStderr: "",
 		},
@@ -66,10 +128,11 @@ func TestNewHTTPClient(t *testing.T) {
 				logVerboseHTTP: false,
 			},
 			host: "github.com",
-			wantHeader: map[string]string{
-				"authorization": "",
-				"user-agent":    "GitHub CLI v1.2.3",
-				"accept":        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+			wantHeader: map[string][]string{
+				"authorization":        nil, // should not be set
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
 			},
 			wantStderr: "",
 		},
@@ -81,10 +144,11 @@ func TestNewHTTPClient(t *testing.T) {
 				logVerboseHTTP: false,
 			},
 			host: "example.com",
-			wantHeader: map[string]string{
-				"authorization": "",
-				"user-agent":    "GitHub CLI v1.2.3",
-				"accept":        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+			wantHeader: map[string][]string{
+				"authorization":        nil, // should not be set
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
 			},
 			wantStderr: "",
 		},
@@ -96,10 +160,11 @@ func TestNewHTTPClient(t *testing.T) {
 				logVerboseHTTP: true,
 			},
 			host: "github.com",
-			wantHeader: map[string]string{
-				"authorization": "token MYTOKEN",
-				"user-agent":    "GitHub CLI v1.2.3",
-				"accept":        "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+			wantHeader: map[string][]string{
+				"authorization":        {"token MYTOKEN"},
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+				"accept":               {"application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview"},
 			},
 			wantStderr: heredoc.Doc(`
 				* Request at <time>
@@ -111,12 +176,55 @@ func TestNewHTTPClient(t *testing.T) {
 				> Content-Type: application/json; charset=utf-8
 				> Time-Zone: <timezone>
 				> User-Agent: GitHub CLI v1.2.3
+				> X-Github-Api-Version: 2022-11-28
 
 				< HTTP/1.1 204 No Content
 				< Date: <time>
 
 				* Request took <duration>
 			`),
+		},
+		{
+			name: "respect skip default headers option",
+			args: args{
+				appVersion:         "v1.2.3",
+				logVerboseHTTP:     true,
+				skipDefaultHeaders: true,
+			},
+			host: "github.com",
+			wantHeader: map[string][]string{
+				"accept":               nil,
+				"authorization":        nil,
+				"content-type":         nil,
+				"user-agent":           {"GitHub CLI v1.2.3"},
+				"x-github-api-version": {"2022-11-28"},
+			},
+			wantStderr: heredoc.Doc(`
+				* Request at <time>
+				* Request to http://<host>:<port>
+				> GET / HTTP/1.1
+				> Host: github.com
+				> Time-Zone: <timezone>
+				> User-Agent: GitHub CLI v1.2.3
+				> X-Github-Api-Version: 2022-11-28
+
+				< HTTP/1.1 204 No Content
+				< Date: <time>
+
+				* Request took <duration>
+			`),
+		},
+		{
+			name: "includes invoking agent in user-agent header",
+			args: args{
+				appVersion:    "v1.2.3",
+				invokingAgent: "copilot-cli",
+			},
+			host: "github.com",
+			wantHeader: map[string][]string{
+				"user-agent": {"GitHub CLI v1.2.3 Agent/copilot-cli"},
+			},
+			wantStderr: "",
 		},
 	}
 
@@ -131,10 +239,12 @@ func TestNewHTTPClient(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ios, _, _, stderr := iostreams.Test()
 			client, err := NewHTTPClient(HTTPClientOptions{
-				AppVersion:     tt.args.appVersion,
-				Config:         tt.args.config,
-				Log:            ios.ErrOut,
-				LogVerboseHTTP: tt.args.logVerboseHTTP,
+				AppVersion:         tt.args.appVersion,
+				InvokingAgent:      tt.args.invokingAgent,
+				Config:             tt.args.config,
+				Log:                ios.ErrOut,
+				LogVerboseHTTP:     tt.args.logVerboseHTTP,
+				SkipDefaultHeaders: tt.args.skipDefaultHeaders,
 			})
 			require.NoError(t, err)
 
@@ -148,7 +258,7 @@ func TestNewHTTPClient(t *testing.T) {
 			require.NoError(t, err)
 
 			for name, value := range tt.wantHeader {
-				assert.Equal(t, value, gotReq.Header.Get(name), name)
+				assert.Equal(t, value, gotReq.Header.Values(name), name)
 			}
 
 			assert.Equal(t, 204, res.StatusCode)
@@ -158,9 +268,13 @@ func TestNewHTTPClient(t *testing.T) {
 }
 
 func TestHTTPClientRedirectAuthenticationHeaderHandling(t *testing.T) {
-	var request *http.Request
+	// Two servers stand in for two different hosts. A dial map lets the test
+	// address them by hostname, so the auth layer compares real hostnames rather
+	// than the ephemeral ports of localhost servers, which it no longer treats as
+	// part of the host.
+	var serverRequest *http.Request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request = r
+		serverRequest = r
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
@@ -168,27 +282,52 @@ func TestHTTPClientRedirectAuthenticationHeaderHandling(t *testing.T) {
 	var redirectRequest *http.Request
 	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirectRequest = r
-		http.Redirect(w, r, server.URL, http.StatusFound)
+		http.Redirect(w, r, "http://canonical.example/", http.StatusFound)
 	}))
 	defer redirectServer.Close()
 
-	client, err := NewHTTPClient(HTTPClientOptions{
-		Config: tinyConfig{
-			fmt.Sprintf("%s:oauth_token", strings.TrimPrefix(redirectServer.URL, "http://")): "REDIRECT-TOKEN",
-			fmt.Sprintf("%s:oauth_token", strings.TrimPrefix(server.URL, "http://")):         "TOKEN",
+	hostToAddr := map[string]string{
+		"other.example":     redirectServer.Listener.Addr().String(),
+		"canonical.example": server.Listener.Addr().String(),
+	}
+	dialer := &net.Dialer{}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if host, _, err := net.SplitHostPort(addr); err == nil {
+				if mapped, ok := hostToAddr[host]; ok {
+					addr = mapped
+				}
+			}
+			return dialer.DialContext(ctx, network, addr)
 		},
-	})
-	require.NoError(t, err)
+	}
+	config := tinyConfig{
+		"other.example:oauth_token":     "OTHER-TOKEN",
+		"canonical.example:oauth_token": "CANONICAL-TOKEN",
+	}
+	client := &http.Client{Transport: AddAuthTokenHeader(transport, config)}
 
-	req, err := http.NewRequest("GET", redirectServer.URL, nil)
+	req, err := http.NewRequest("GET", "http://other.example/", nil)
 	require.NoError(t, err)
 
 	res, err := client.Do(req)
 	require.NoError(t, err)
 
-	assert.Equal(t, "token REDIRECT-TOKEN", redirectRequest.Header.Get(authorization))
-	assert.Equal(t, "", request.Header.Get(authorization))
+	// The initial request is authenticated as its own host.
+	assert.Equal(t, "token OTHER-TOKEN", redirectRequest.Header.Get(authorization))
+	// Following the redirect crosses to a different host, so no token is attached,
+	// even though one is configured for that host.
+	assert.Equal(t, "", serverRequest.Header.Get(authorization))
 	assert.Equal(t, 204, res.StatusCode)
+}
+
+// serverHostname returns the hostname of a test server URL, so config can be
+// keyed by host, as production config is, rather than host:port.
+func serverHostname(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	return u.Hostname()
 }
 
 func TestHTTPClientSanitizeJSONControlCharactersC0(t *testing.T) {
@@ -263,10 +402,140 @@ func TestHTTPClientSanitizeControlCharactersC1(t *testing.T) {
 	assert.Equal(t, "monalisa¡", issue.Author.Login)
 }
 
+func TestNewHTTPClientTelemetryDisabler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	tests := []struct {
+		name         string
+		host         string
+		wantDisabled bool
+	}{
+		{
+			name:         "enterprise host triggers disable",
+			host:         "ghes.example.com",
+			wantDisabled: true,
+		},
+		{
+			name:         "github.com does not trigger disable",
+			host:         "github.com",
+			wantDisabled: false,
+		},
+		{
+			name:         "tenancy host does not trigger disable",
+			host:         "my-company.ghe.com",
+			wantDisabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			disabler := &fakeTelemetryDisabler{}
+			client, err := NewHTTPClient(HTTPClientOptions{
+				TelemetryDisabler: disabler,
+			})
+			require.NoError(t, err)
+
+			req, err := http.NewRequest("GET", ts.URL, nil)
+			require.NoError(t, err)
+			req.Host = tt.host
+
+			res, err := client.Do(req)
+			require.NoError(t, err)
+			assert.Equal(t, 204, res.StatusCode)
+			assert.Equal(t, tt.wantDisabled, disabler.disabled, "Disable() called")
+		})
+	}
+}
+
+func TestNewHTTPClientWithoutTelemetryDisabler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	client, err := NewHTTPClient(HTTPClientOptions{})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest("GET", ts.URL, nil)
+	require.NoError(t, err)
+	req.Host = "ghes.example.com"
+
+	res, err := client.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, 204, res.StatusCode)
+}
+
+func TestNewExternalHTTPClient(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "third-party host",
+			url:  "https://example.com/path",
+		},
+		{
+			// Even when talking to GitHub, the external client must not set
+			// authorization or any GitHub-specific headers.
+			name: "github.com host",
+			url:  "https://api.github.com/repos/cli/cli",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReq *http.Request
+			transport := &funcTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+				gotReq = req
+				return &http.Response{StatusCode: 204, Body: io.NopCloser(strings.NewReader(""))}, nil
+			}}
+
+			client, err := NewExternalHTTPClient(ExternalHTTPClientOptions{
+				AppVersion: "v1.2.3",
+				Transport:  transport,
+			})
+			require.NoError(t, err)
+
+			req, err := http.NewRequest("GET", tt.url, nil)
+			require.NoError(t, err)
+
+			res, err := client.Do(req)
+			require.NoError(t, err)
+			assert.Equal(t, 204, res.StatusCode)
+
+			// No headers should be set by default, except for User-Agent which should include the app version.
+			assert.Equal(t, []string{"GitHub CLI v1.2.3"}, gotReq.Header.Values("user-agent"))
+			assert.Empty(t, gotReq.Header.Values("authorization"))
+			assert.Empty(t, gotReq.Header.Values("x-github-api-version"))
+			assert.Empty(t, gotReq.Header.Values("accept"))
+			assert.Empty(t, gotReq.Header.Values("content-type"))
+			assert.Empty(t, gotReq.Header.Values("time-zone"))
+		})
+	}
+}
+
+type fakeTelemetryDisabler struct {
+	disabled bool
+}
+
+func (f *fakeTelemetryDisabler) Disable() {
+	f.disabled = true
+}
+
 type tinyConfig map[string]string
 
 func (c tinyConfig) ActiveToken(host string) (string, string) {
 	return c[fmt.Sprintf("%s:%s", host, "oauth_token")], "oauth_token"
+}
+
+// HostForAPIHost resolves via an "api_host:<apiHost>" key holding the host that
+// configured it, mirroring the reverse lookup the real config performs.
+func (c tinyConfig) HostForAPIHost(apiHost string) (string, bool) {
+	host, ok := c[fmt.Sprintf("%s:%s", "api_host", apiHost)]
+	return host, ok
 }
 
 var requestAtRE = regexp.MustCompile(`(?m)^\* Request at .+`)

@@ -7,19 +7,40 @@ import (
 // TODO: clean up methods in this file when there are no more callers
 
 func (r *Registry) StubRepoInfoResponse(owner, repo, branch string) {
+	r.StubRepoInfoResponseWithPermission(owner, repo, branch, "WRITE")
+}
+
+// StubRepoInfoResponseWithPermission is StubRepoInfoResponse with a
+// caller-selected viewer permission.
+func (r *Registry) StubRepoInfoResponseWithPermission(owner, repo, branch, permission string) {
 	r.Register(
 		GraphQL(`query RepositoryInfo\b`),
 		StringResponse(fmt.Sprintf(`
 		{ "data": { "repository": {
 			"id": "REPOID",
+			"databaseId": 1234,
 			"name": "%s",
 			"owner": {"login": "%s"},
 			"description": "",
 			"defaultBranchRef": {"name": "%s"},
 			"hasIssuesEnabled": true,
+			"viewerPermission": "%s"
+		} } }
+		`, repo, owner, branch, permission)))
+}
+
+func (r *Registry) StubIssueRepoInfoResponse(owner, repo string) {
+	r.Register(
+		GraphQL(`query IssueRepositoryInfo\b`),
+		StringResponse(fmt.Sprintf(`
+		{ "data": { "repository": {
+			"id": "REPOID",
+			"name": "%s",
+			"owner": {"login": "%s"},
+			"hasIssuesEnabled": true,
 			"viewerPermission": "WRITE"
 		} } }
-		`, repo, owner, branch)))
+		`, repo, owner)))
 }
 
 func (r *Registry) StubRepoResponse(owner, repo string) {

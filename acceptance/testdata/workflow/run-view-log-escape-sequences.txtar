@@ -1,0 +1,65 @@
+# requires-user-capability: false
+
+# This test ensures that a malicious workflow which emit terminal control sequences (ESC, OSC, CSI) in
+# its log output does not result in terminal injection when logs are displayed using `gh run view --log`
+
+# Use gh as a credential helper
+exec gh auth setup-git
+
+# Create a repository with a file so it has a default branch
+fixture-repo isolated REPO
+
+# Clone the repo
+exec gh repo clone $ORG/$REPO
+
+# Commit the workflow file
+cd $REPO
+mkdir .github/workflows
+mv ../workflow.yml .github/workflows/workflow.yml
+exec git add .github/workflows/workflow.yml
+exec git commit -m 'Create workflow with escape sequences'
+exec git push -u origin main
+
+# Wait for the workflow definition to register
+wait-for-workflow 'Escape Sequence PoC'
+
+# Run the workflow
+exec gh workflow run 'Escape Sequence PoC'
+
+# Wait for the run to register
+wait-for-run RUN_ID
+
+# Wait for workflow to complete
+exec gh run watch $RUN_ID --exit-status
+
+# View the logs and check that raw ESC bytes (0x1b) are NOT present in output.
+# If this assertion fails, it means terminal escape sequences from the workflow
+# log are being passed through to the user's terminal unsanitised.
+exec gh run view $RUN_ID --log
+
+# The output should contain the safe/visible text but not raw ESC bytes.
+# \x1b is the ESC byte - it must not appear in the output.
+! stdout '\x1b'
+
+# The log output should still contain the non-escape parts of the log lines.
+stdout 'ESCAPE_MARKER_START'
+stdout 'ESCAPE_MARKER_END'
+
+-- workflow.yml --
+name: Escape Sequence PoC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  emit-escape-sequences:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit terminal escape sequences
+        run: |
+          # OSC title set: \x1b]0;TITLE\x07
+          printf 'ESCAPE_MARKER_START \033]0;HIJACKED_TITLE\007 ESCAPE_MARKER_END\n'
+          # CSI color: \x1b[31m ... \x1b[0m
+          printf 'ESCAPE_MARKER_START \033[31mRED_TEXT\033[0m ESCAPE_MARKER_END\n'
+          # Screen title set (from original PoC): \x1bk ... \x1b\\
+          printf 'ESCAPE_MARKER_START \033k;malicious command;\033\\ ESCAPE_MARKER_END\n'

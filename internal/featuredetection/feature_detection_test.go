@@ -5,11 +5,16 @@ import (
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIssueFeatures(t *testing.T) {
+	issueFieldsWithRelationships := `{"data":{"Issue":{"fields":[{"name":"title"},{"name":"body"},{"name":"blockedBy"}]}}}`
+	issueFieldsWithoutRelationships := `{"data":{"Issue":{"fields":[{"name":"title"},{"name":"body"}]}}}`
+
 	tests := []struct {
 		name          string
 		hostname      string
@@ -21,33 +26,41 @@ func TestIssueFeatures(t *testing.T) {
 			name:     "github.com",
 			hostname: "github.com",
 			wantFeatures: IssueFeatures{
-				StateReason: true,
+				ApiActorsSupported:          true,
+				IssueRelationshipsSupported: true,
 			},
 			wantErr: false,
 		},
 		{
-			name:     "GHE empty response",
-			hostname: "git.my.org",
-			queryResponse: map[string]string{
-				`query Issue_fields\b`: `{"data": {}}`,
-			},
+			name:     "ghec data residency (ghe.com)",
+			hostname: "stampname.ghe.com",
 			wantFeatures: IssueFeatures{
-				StateReason: false,
+				ApiActorsSupported:          true,
+				IssueRelationshipsSupported: true,
 			},
 			wantErr: false,
 		},
 		{
-			name:     "GHE has state reason field",
+			name:     "GHE with relationship support",
 			hostname: "git.my.org",
 			queryResponse: map[string]string{
-				`query Issue_fields\b`: heredoc.Doc(`
-					{ "data": { "Issue": { "fields": [
-						{"name": "stateReason"}
-					] } } }
-				`),
+				`query Issue_fields`: issueFieldsWithRelationships,
 			},
 			wantFeatures: IssueFeatures{
-				StateReason: true,
+				ApiActorsSupported:          false,
+				IssueRelationshipsSupported: true,
+			},
+			wantErr: false,
+		},
+		{
+			name:     "GHE without relationship support",
+			hostname: "git.my.org",
+			queryResponse: map[string]string{
+				`query Issue_fields`: issueFieldsWithoutRelationships,
+			},
+			wantFeatures: IssueFeatures{
+				ApiActorsSupported:          false,
+				IssueRelationshipsSupported: false,
 			},
 			wantErr: false,
 		},
@@ -56,6 +69,7 @@ func TestIssueFeatures(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
 			httpClient := &http.Client{}
 			httpmock.ReplaceTripper(httpClient, reg)
 			for query, resp := range tt.queryResponse {
@@ -272,6 +286,16 @@ func TestRepositoryFeatures(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:     "ghec data residency (ghe.com)",
+			hostname: "stampname.ghe.com",
+			wantFeatures: RepositoryFeatures{
+				PullRequestTemplateQuery: true,
+				VisibilityField:          true,
+				AutoMerge:                true,
+			},
+			wantErr: false,
+		},
+		{
 			name:     "GHE empty response",
 			hostname: "git.my.org",
 			queryResponse: map[string]string{
@@ -345,6 +369,475 @@ func TestRepositoryFeatures(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantFeatures, gotFeatures)
+		})
+	}
+}
+
+func TestProjectV1Support(t *testing.T) {
+	tests := []struct {
+		name         string
+		hostname     string
+		httpStubs    func(*httpmock.Registry)
+		wantFeatures gh.ProjectsV1Support
+	}{
+		{
+			name:         "github.com",
+			hostname:     "github.com",
+			wantFeatures: gh.ProjectsV1Unsupported,
+		},
+		{
+			name:         "ghec data residency (ghe.com)",
+			hostname:     "stampname.ghe.com",
+			wantFeatures: gh.ProjectsV1Unsupported,
+		},
+		{
+			name:     "GHE 3.16.0",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.16.0"}`),
+				)
+			},
+			wantFeatures: gh.ProjectsV1Supported,
+		},
+		{
+			name:     "GHE 3.16.1",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.16.1"}`),
+				)
+			},
+			wantFeatures: gh.ProjectsV1Supported,
+		},
+		{
+			name:     "GHE 3.17",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.17.0"}`),
+				)
+			},
+			wantFeatures: gh.ProjectsV1Unsupported,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &httpmock.Registry{}
+			if tt.httpStubs != nil {
+				tt.httpStubs(reg)
+			}
+			httpClient := &http.Client{}
+			httpmock.ReplaceTripper(httpClient, reg)
+
+			detector := NewDetector(httpClient, tt.hostname)
+			require.Equal(t, tt.wantFeatures, detector.ProjectsV1())
+		})
+	}
+}
+
+func TestAdvancedIssueSearchSupport(t *testing.T) {
+	withIssueAdvanced := `{"data":{"SearchType":{"enumValues":[{"name":"ISSUE"},{"name":"ISSUE_ADVANCED"},{"name":"REPOSITORY"},{"name":"USER"},{"name":"DISCUSSION"}]}}}`
+	withoutIssueAdvanced := `{"data":{"SearchType":{"enumValues":[{"name":"ISSUE"},{"name":"REPOSITORY"},{"name":"USER"},{"name":"DISCUSSION"}]}}}`
+
+	// Dotcom hosts (github.com and ghe.com data residency) additionally expose
+	// ISSUE_SEMANTIC and ISSUE_HYBRID on the SearchType enum. Single-tenant GHES
+	// does not.
+	withIssueAdvancedAndSemantic := `{"data":{"SearchType":{"enumValues":[{"name":"ISSUE"},{"name":"ISSUE_ADVANCED"},{"name":"ISSUE_SEMANTIC"},{"name":"ISSUE_HYBRID"},{"name":"REPOSITORY"},{"name":"USER"},{"name":"DISCUSSION"}]}}}`
+
+	dotcomSupported := SearchFeatures{
+		AdvancedIssueSearchAPI:      true,
+		AdvancedIssueSearchAPIOptIn: true,
+		SemanticSearch:              true,
+		HybridSearch:                true,
+	}
+
+	tests := []struct {
+		name         string
+		hostname     string
+		httpStubs    func(*httpmock.Registry)
+		wantFeatures SearchFeatures
+	}{
+		{
+			name:     "github.com",
+			hostname: "github.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withIssueAdvancedAndSemantic),
+				)
+			},
+			wantFeatures: dotcomSupported,
+		},
+		{
+			name:     "ghec data residency (ghe.com)",
+			hostname: "stampname.ghe.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withIssueAdvancedAndSemantic),
+				)
+			},
+			wantFeatures: dotcomSupported,
+		},
+		{
+			name:     "GHE 3.18, before ISSUE_ADVANCED cleanup",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.18.0"}`),
+				)
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withIssueAdvanced),
+				)
+			},
+			wantFeatures: advancedIssueSearchSupportedAsOptIn,
+		},
+		{
+			name:     "GHE 3.18, after ISSUE_ADVANCED cleanup",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.18.0"}`),
+				)
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withoutIssueAdvanced),
+				)
+			},
+			wantFeatures: advancedIssueSearchSupportedAsOnlyBackend,
+		},
+		{
+			name:     "GHE >3.18, before ISSUE_ADVANCED cleanup",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.18.1"}`),
+				)
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withIssueAdvanced),
+				)
+			},
+			wantFeatures: advancedIssueSearchSupportedAsOptIn,
+		},
+		{
+			name:     "GHE >3.18, after ISSUE_ADVANCED cleanup",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.18.1"}`),
+				)
+				reg.Register(
+					httpmock.GraphQL(`query SearchType_enumValues\b`),
+					httpmock.StringResponse(withoutIssueAdvanced),
+				)
+			},
+			wantFeatures: advancedIssueSearchSupportedAsOnlyBackend,
+		},
+		{
+			name:     "GHE <3.18 (no advanced issue search support)",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.17.999"}`),
+				)
+			},
+			wantFeatures: advancedIssueSearchNotSupported,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &httpmock.Registry{}
+			if tt.httpStubs != nil {
+				tt.httpStubs(reg)
+			}
+			httpClient := &http.Client{}
+			httpmock.ReplaceTripper(httpClient, reg)
+
+			detector := NewDetector(httpClient, tt.hostname)
+
+			features, err := detector.SearchFeatures()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantFeatures, features)
+		})
+	}
+}
+
+func TestProjectFeatures(t *testing.T) {
+	tests := []struct {
+		name          string
+		hostname      string
+		queryResponse map[string]string
+		wantFeatures  ProjectFeatures
+		wantErr       bool
+	}{
+		{
+			name:     "github.com",
+			hostname: "github.com",
+			wantFeatures: ProjectFeatures{
+				ProjectItemQuery: true,
+			},
+		},
+		{
+			name:     "ghec data residency (ghe.com)",
+			hostname: "stampname.ghe.com",
+			wantFeatures: ProjectFeatures{
+				ProjectItemQuery: true,
+			},
+		},
+		{
+			name:     "GHE empty response",
+			hostname: "git.my.org",
+			queryResponse: map[string]string{
+				`query ProjectV2_fields\b`: `{"data": {}}`,
+			},
+			wantFeatures: ProjectFeatures{},
+		},
+		{
+			name:     "GHE items field without query arg",
+			hostname: "git.my.org",
+			queryResponse: map[string]string{
+				`query ProjectV2_fields\b`: heredoc.Doc(`
+					{ "data": { "ProjectV2": { "fields": [
+						{"name": "items", "args": [
+							{"name": "after"},
+							{"name": "first"}
+						]}
+					] } } }
+				`),
+			},
+			wantFeatures: ProjectFeatures{},
+		},
+		{
+			name:     "GHE items field with query arg",
+			hostname: "git.my.org",
+			queryResponse: map[string]string{
+				`query ProjectV2_fields\b`: heredoc.Doc(`
+					{ "data": { "ProjectV2": { "fields": [
+						{"name": "items", "args": [
+							{"name": "after"},
+							{"name": "first"},
+							{"name": "query"}
+						]}
+					] } } }
+				`),
+			},
+			wantFeatures: ProjectFeatures{
+				ProjectItemQuery: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
+			httpClient := &http.Client{}
+			httpmock.ReplaceTripper(httpClient, reg)
+			for query, resp := range tt.queryResponse {
+				reg.Register(httpmock.GraphQL(query), httpmock.StringResponse(resp))
+			}
+			detector := detector{host: tt.hostname, httpClient: httpClient}
+			gotFeatures, err := detector.ProjectFeatures()
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantFeatures, gotFeatures)
+		})
+	}
+}
+
+func TestReleaseFeatures(t *testing.T) {
+	withImmutableReleaseSupport := `{"data":{"Release":{"fields":[{"name":"author"},{"name":"name"},{"name":"immutable"}]}}}`
+	withoutImmutableReleaseSupport := `{"data":{"Release":{"fields":[{"name":"author"},{"name":"name"}]}}}`
+
+	tests := []struct {
+		name         string
+		hostname     string
+		httpStubs    func(*httpmock.Registry)
+		wantFeatures ReleaseFeatures
+	}{
+		{
+			// This is not a real case as `github.com` supports immutable releases.
+			name:     "github.com, immutable releases unsupported",
+			hostname: "github.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withoutImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: false,
+			},
+		},
+		{
+			name:     "github.com, immutable releases supported",
+			hostname: "github.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: true,
+			},
+		},
+		{
+			// This is not a real case as `github.com` supports immutable releases.
+			name:     "ghec data residency (ghe.com), immutable releases unsupported",
+			hostname: "stampname.ghe.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withoutImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: false,
+			},
+		},
+		{
+			name:     "ghec data residency (ghe.com), immutable releases supported",
+			hostname: "stampname.ghe.com",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: true,
+			},
+		},
+		{
+			name:     "GHE, immutable releases unsupported",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withoutImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: false,
+			},
+		},
+		{
+			name:     "GHE, immutable releases supported",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query Release_fields\b`),
+					httpmock.StringResponse(withImmutableReleaseSupport),
+				)
+			},
+			wantFeatures: ReleaseFeatures{
+				ImmutableReleases: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &httpmock.Registry{}
+			if tt.httpStubs != nil {
+				tt.httpStubs(reg)
+			}
+			httpClient := &http.Client{}
+			httpmock.ReplaceTripper(httpClient, reg)
+
+			detector := NewDetector(httpClient, tt.hostname)
+
+			features, err := detector.ReleaseFeatures()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantFeatures, features)
+		})
+	}
+}
+
+func TestActionsFeatures(t *testing.T) {
+	tests := []struct {
+		name         string
+		hostname     string
+		httpStubs    func(*httpmock.Registry)
+		wantFeatures ActionsFeatures
+	}{
+		{
+			name:     "github.com, workflow dispatch run details supported",
+			hostname: "github.com",
+			wantFeatures: ActionsFeatures{
+				DispatchRunDetails: true,
+			},
+		},
+		{
+			name:     "ghec data residency (ghe.com), workflow dispatch run details supported",
+			hostname: "stampname.ghe.com",
+			wantFeatures: ActionsFeatures{
+				DispatchRunDetails: true,
+			},
+		},
+		{
+			name:     "GHE 3.20, workflow dispatch run details not supported",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.20.999"}`),
+				)
+			},
+			wantFeatures: ActionsFeatures{
+				DispatchRunDetails: false,
+			},
+		},
+		{
+			name:     "GHE 3.21, workflow dispatch run details supported",
+			hostname: "git.my.org",
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "api/v3/meta"),
+					httpmock.StringResponse(`{"installed_version":"3.21.0"}`),
+				)
+			},
+			wantFeatures: ActionsFeatures{
+				DispatchRunDetails: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &httpmock.Registry{}
+			if tt.httpStubs != nil {
+				tt.httpStubs(reg)
+			}
+			httpClient := &http.Client{}
+			httpmock.ReplaceTripper(httpClient, reg)
+
+			detector := NewDetector(httpClient, tt.hostname)
+
+			features, err := detector.ActionsFeatures()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantFeatures, features)
 		})
 	}
 }

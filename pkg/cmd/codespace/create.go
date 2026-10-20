@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -88,6 +89,11 @@ func newCreateCmd(app *App) *cobra.Command {
 		Short: "Create a codespace",
 		Args:  noArgsConstraint,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if opts.repo != "" {
+				if err := validateNWO(opts.repo); err != nil {
+					return cmdutil.FlagErrorf("invalid value for --repo: %v", err)
+				}
+			}
 			return cmdutil.MutuallyExclusive(
 				"using --web with --display-name, --idle-timeout, or --retention-period is not supported",
 				opts.useWeb,
@@ -99,22 +105,22 @@ func newCreateCmd(app *App) *cobra.Command {
 		},
 	}
 
-	createCmd.Flags().BoolVarP(&opts.useWeb, "web", "w", false, "create codespace from browser, cannot be used with --display-name, --idle-timeout, or --retention-period")
+	createCmd.Flags().BoolVarP(&opts.useWeb, "web", "w", false, "Create codespace from browser, cannot be used with --display-name, --idle-timeout, or --retention-period")
 
-	createCmd.Flags().StringVarP(&opts.repo, "repo", "R", "", "repository name with owner: user/repo")
+	createCmd.Flags().StringVarP(&opts.repo, "repo", "R", "", "Repository name with owner: user/repo")
 	if err := addDeprecatedRepoShorthand(createCmd, &opts.repo); err != nil {
 		fmt.Fprintf(app.io.ErrOut, "%v\n", err)
 	}
 
-	createCmd.Flags().StringVarP(&opts.branch, "branch", "b", "", "repository branch")
-	createCmd.Flags().StringVarP(&opts.location, "location", "l", "", "location: {EastUs|SouthEastAsia|WestEurope|WestUs2} (determined automatically if not provided)")
-	createCmd.Flags().StringVarP(&opts.machine, "machine", "m", "", "hardware specifications for the VM")
-	createCmd.Flags().BoolVarP(&opts.permissionsOptOut, "default-permissions", "", false, "do not prompt to accept additional permissions requested by the codespace")
-	createCmd.Flags().BoolVarP(&opts.showStatus, "status", "s", false, "show status of post-create command and dotfiles")
-	createCmd.Flags().DurationVar(&opts.idleTimeout, "idle-timeout", 0, "allowed inactivity before codespace is stopped, e.g. \"10m\", \"1h\"")
-	createCmd.Flags().Var(&opts.retentionPeriod, "retention-period", "allowed time after shutting down before the codespace is automatically deleted (maximum 30 days), e.g. \"1h\", \"72h\"")
-	createCmd.Flags().StringVar(&opts.devContainerPath, "devcontainer-path", "", "path to the devcontainer.json file to use when creating codespace")
-	createCmd.Flags().StringVarP(&opts.displayName, "display-name", "d", "", fmt.Sprintf("display name for the codespace (%d characters or less)", displayNameMaxLength))
+	createCmd.Flags().StringVarP(&opts.branch, "branch", "b", "", "Repository branch")
+	createCmd.Flags().StringVarP(&opts.location, "location", "l", "", "Location: {EastUs|SouthEastAsia|WestEurope|WestUs2} (determined automatically if not provided)")
+	createCmd.Flags().StringVarP(&opts.machine, "machine", "m", "", "Hardware specifications for the VM")
+	createCmd.Flags().BoolVarP(&opts.permissionsOptOut, "default-permissions", "", false, "Do not prompt to accept additional permissions requested by the codespace")
+	createCmd.Flags().BoolVarP(&opts.showStatus, "status", "s", false, "Show status of post-create command and dotfiles")
+	createCmd.Flags().DurationVar(&opts.idleTimeout, "idle-timeout", 0, "Allowed inactivity before codespace is stopped, e.g. \"10m\", \"1h\"")
+	createCmd.Flags().Var(&opts.retentionPeriod, "retention-period", "Allowed time after shutting down before the codespace is automatically deleted (maximum 30 days), e.g. \"1h\", \"72h\"")
+	createCmd.Flags().StringVar(&opts.devContainerPath, "devcontainer-path", "", "Path to the devcontainer.json file to use when creating codespace")
+	createCmd.Flags().StringVarP(&opts.displayName, "display-name", "d", "", fmt.Sprintf("Display name for the codespace (%d characters or less)", displayNameMaxLength))
 
 	return createCmd
 }
@@ -239,12 +245,12 @@ func (a *App) Create(ctx context.Context, opts createOptions) error {
 		if len(devcontainers) > 0 {
 
 			// if there is only one devcontainer.json file and it is one of the default paths we can auto-select it
-			if len(devcontainers) == 1 && stringInSlice(devcontainers[0].Path, DEFAULT_DEVCONTAINER_DEFINITIONS) {
+			if len(devcontainers) == 1 && slices.Contains(DEFAULT_DEVCONTAINER_DEFINITIONS, devcontainers[0].Path) {
 				devContainerPath = devcontainers[0].Path
 			} else {
 				promptOptions := []string{}
 
-				if !stringInSlice(devcontainers[0].Path, DEFAULT_DEVCONTAINER_DEFINITIONS) {
+				if !slices.Contains(DEFAULT_DEVCONTAINER_DEFINITIONS, devcontainers[0].Path) {
 					promptOptions = []string{DEVCONTAINER_PROMPT_DEFAULT}
 				}
 
@@ -511,7 +517,7 @@ func (a *App) showStatus(ctx context.Context, codespace *api.Codespace) error {
 }
 
 // getMachineName prompts the user to select the machine type, or validates the machine if non-empty.
-func getMachineName(ctx context.Context, apiClient apiClient, prompter SurveyPrompter, repoID int, machine, branch, location string, devcontainerPath string) (string, error) {
+func getMachineName(ctx context.Context, apiClient apiClient, prompter SurveyPrompter, repoID int64, machine, branch, location string, devcontainerPath string) (string, error) {
 	machines, err := apiClient.GetCodespacesMachines(ctx, repoID, branch, location, devcontainerPath)
 	if err != nil {
 		return "", fmt.Errorf("error requesting machine instance types: %w", err)
@@ -527,7 +533,7 @@ func getMachineName(ctx context.Context, apiClient apiClient, prompter SurveyPro
 		}
 
 		availableMachines := make([]string, len(machines))
-		for i := 0; i < len(machines); i++ {
+		for i := range machines {
 			availableMachines[i] = machines[i].Name
 		}
 
@@ -597,13 +603,4 @@ func buildDisplayName(displayName string, prebuildAvailability string) string {
 	default:
 		return displayName
 	}
-}
-
-func stringInSlice(a string, slice []string) bool {
-	for _, b := range slice {
-		if b == a {
-			return true
-		}
-	}
-	return false
 }

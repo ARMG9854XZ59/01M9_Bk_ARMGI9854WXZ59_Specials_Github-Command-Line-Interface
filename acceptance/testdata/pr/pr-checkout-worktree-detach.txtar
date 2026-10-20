@@ -1,0 +1,56 @@
+# requires-user-capability: false
+
+# Checkout a PR into a worktree with a detached HEAD, then reuse that worktree.
+
+# Set up env vars
+
+# Use gh as a credential helper
+exec gh auth setup-git
+
+# Create a repository with a file so it has a default branch
+fixture-repo shared REPO
+env BRANCH_NAME=${SCRIPT_NAME}-${RANDOM_STRING}
+env PR_TITLE=${SCRIPT_NAME}-${RANDOM_STRING}
+
+# Clone the repo
+exec gh repo clone ${ORG}/${REPO}
+
+# Prepare a branch to PR
+cd ${REPO}
+exec git checkout -b $BRANCH_NAME
+exec git commit --allow-empty -m 'Empty Commit'
+exec git push -u origin $BRANCH_NAME
+
+# Create the PR
+exec gh pr create --title $PR_TITLE --body 'Feature Body'
+stdout2env PR_URL
+
+# Return to the default branch
+exec git checkout main
+
+# Checkout the PR into a fresh worktree with a detached HEAD
+exec gh pr checkout ${PR_URL} --detach --worktree ../wt
+exists ../wt
+
+# The worktree HEAD is detached, so it has no symbolic ref
+! exec git -C ../wt symbolic-ref -q HEAD
+
+# The detached HEAD points at the PR head commit
+exec git -C ../wt rev-parse HEAD
+stdout2env WT_HEAD
+exec git rev-parse origin/$BRANCH_NAME
+stdout ${WT_HEAD}
+
+# The main working copy is left untouched
+exec git rev-parse --abbrev-ref HEAD
+stdout '(?m)^main$'
+
+# Checking out again into the same worktree reuses it and stays detached
+exec gh pr checkout ${PR_URL} --detach --worktree ../wt
+! exec git -C ../wt symbolic-ref -q HEAD
+exec git -C ../wt rev-parse HEAD
+stdout ${WT_HEAD}
+
+# The main working copy is left untouched
+exec git rev-parse --abbrev-ref HEAD
+stdout '(?m)^main$'

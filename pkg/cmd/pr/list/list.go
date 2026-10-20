@@ -10,6 +10,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
@@ -24,6 +25,7 @@ type ListOptions struct {
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
 	Browser    browser.Browser
+	Detector   fd.Detector
 
 	WebMode      bool
 	LimitResults int
@@ -54,23 +56,35 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List pull requests in a repository",
-		Long: heredoc.Doc(`
-			List pull requests in a GitHub repository.
+		// TODO advancedIssueSearchCleanup
+		// Update the links and remove the mention at GHES 3.17 version.
+		Long: heredoc.Docf(`
+			List pull requests in a GitHub repository. By default, this only lists open PRs.
 
 			The search query syntax is documented here:
 			<https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests>
-		`),
+			
+			On supported GitHub hosts, advanced issue search syntax can be used in the
+			%[1]s--search%[1]s query. For more information about advanced issue search, see:
+			<https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests#building-advanced-filters-for-issues>
+		`, "`"),
 		Example: heredoc.Doc(`
-			List PRs authored by you
+			# List PRs authored by you
 			$ gh pr list --author "@me"
 
-			List only PRs with all of the given labels
+			# List PRs opened by a GitHub App such as Dependabot
+			$ gh pr list --app dependabot
+
+			# List PRs with a specific head branch name
+			$ gh pr list --head "typo"
+
+			# List only PRs with all of the given labels
 			$ gh pr list --label bug --label "priority 1"
 
-			Filter PRs using search syntax
+			# Filter PRs using search syntax
 			$ gh pr list --search "status:success review:required"
 
-			Find a PR that introduced a given commit
+			# Find a PR that introduced a given commit
 			$ gh pr list --search "<SHA>" --state merged
 		`),
 		Aliases: []string{"ls"},
@@ -102,9 +116,9 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd.Flags().IntVarP(&opts.LimitResults, "limit", "L", 30, "Maximum number of items to fetch")
 	cmdutil.StringEnumFlag(cmd, &opts.State, "state", "s", "open", []string{"open", "closed", "merged", "all"}, "Filter by state")
 	cmd.Flags().StringVarP(&opts.BaseBranch, "base", "B", "", "Filter by base branch")
-	cmd.Flags().StringVarP(&opts.HeadBranch, "head", "H", "", "Filter by head branch")
+	cmd.Flags().StringVarP(&opts.HeadBranch, "head", "H", "", `Filter by head branch ("<owner>:<branch>" syntax not supported)`)
 	cmd.Flags().StringSliceVarP(&opts.Labels, "label", "l", nil, "Filter by label")
-	cmd.Flags().StringVarP(&opts.Author, "author", "A", "", "Filter by author")
+	cmd.Flags().StringVarP(&opts.Author, "author", "A", "", "Filter by author (use --app to filter by a GitHub App)")
 	cmd.Flags().StringVar(&appAuthor, "app", "", "Filter by GitHub App author")
 	cmd.Flags().StringVarP(&opts.Assignee, "assignee", "a", "", "Filter by assignee")
 	cmd.Flags().StringVarP(&opts.Search, "search", "S", "", "Search pull requests with `query`")
@@ -139,6 +153,11 @@ func listRun(opts *ListOptions) error {
 		return err
 	}
 
+	if opts.Detector == nil {
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
+	}
+
 	prState := strings.ToLower(opts.State)
 	if prState == "open" && shared.QueryHasStateClause(opts.Search) {
 		prState = ""
@@ -161,7 +180,12 @@ func listRun(opts *ListOptions) error {
 	}
 	if opts.WebMode {
 		prListURL := ghrepo.GenerateRepoURL(baseRepo, "pulls")
-		openURL, err := shared.ListURLWithQuery(prListURL, filters)
+
+		// TODO advancedSearchFuture
+		// As of August 2025, the advanced issue search syntax is not supported
+		// in Pull Requests tab of repositories. When it's supported we can
+		// change the argument to true.
+		openURL, err := shared.ListURLWithQuery(prListURL, filters, false)
 		if err != nil {
 			return err
 		}
@@ -172,7 +196,7 @@ func listRun(opts *ListOptions) error {
 		return opts.Browser.Browse(openURL)
 	}
 
-	listResult, err := listPullRequests(httpClient, baseRepo, filters, opts.LimitResults)
+	listResult, err := listPullRequests(httpClient, opts.Detector, baseRepo, filters, opts.LimitResults)
 	if err != nil {
 		return err
 	}
@@ -222,9 +246,9 @@ func listRun(opts *ListOptions) error {
 		table.AddField(text.RemoveExcessiveWhitespace(pr.Title))
 		table.AddField(pr.HeadLabel(), tableprinter.WithColor(cs.Cyan))
 		if !isTTY {
-			table.AddField(prStateWithDraft(&pr))
+			table.AddField(shared.PrStateWithDraft(&pr))
 		}
-		table.AddTimeField(opts.Now(), pr.CreatedAt, cs.Gray)
+		table.AddTimeField(opts.Now(), pr.CreatedAt, cs.Muted)
 		table.EndRow()
 	}
 	err = table.Render()
@@ -233,12 +257,4 @@ func listRun(opts *ListOptions) error {
 	}
 
 	return nil
-}
-
-func prStateWithDraft(pr *api.PullRequest) string {
-	if pr.IsDraft && pr.State == "OPEN" {
-		return "DRAFT"
-	}
-
-	return pr.State
 }

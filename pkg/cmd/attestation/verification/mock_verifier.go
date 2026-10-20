@@ -6,21 +6,25 @@ import (
 
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test/data"
+	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 
-	"github.com/in-toto/in-toto-golang/in_toto"
+	in_toto "github.com/in-toto/attestation/go/v1"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 )
 
-const SLSAPredicateType = "https://slsa.dev/provenance/v1"
-
 type MockSigstoreVerifier struct {
-	t *testing.T
+	t           *testing.T
+	mockResults []*AttestationProcessingResult
 }
 
-func (v *MockSigstoreVerifier) Verify(attestations []*api.Attestation, policy verify.PolicyBuilder) *SigstoreResults {
+func (v *MockSigstoreVerifier) Verify([]*api.Attestation, verify.PolicyBuilder) ([]*AttestationProcessingResult, error) {
+	if v.mockResults != nil {
+		return v.mockResults, nil
+	}
+
 	statement := &in_toto.Statement{}
-	statement.PredicateType = SLSAPredicateType
+	statement.PredicateType = SLSAPredicateV1
 
 	result := AttestationProcessingResult{
 		Attestation: &api.Attestation{
@@ -30,11 +34,10 @@ func (v *MockSigstoreVerifier) Verify(attestations []*api.Attestation, policy ve
 			Statement: statement,
 			Signature: &verify.SignatureVerificationResult{
 				Certificate: &certificate.Summary{
-					Extensions: certificate.Extensions{
-						BuildSignerURI:           "https://github.com/github/example/.github/workflows/release.yml@refs/heads/main",
-						SourceRepositoryOwnerURI: "https://github.com/sigstore",
-						SourceRepositoryURI:      "https://github.com/sigstore/sigstore-js",
-					},
+					BuildSignerURI:           "https://github.com/github/example/.github/workflows/release.yml@refs/heads/main",
+					SourceRepositoryOwnerURI: "https://github.com/sigstore",
+					SourceRepositoryURI:      "https://github.com/sigstore/sigstore-js",
+					Issuer:                   "https://token.actions.githubusercontent.com",
 				},
 			},
 		},
@@ -42,19 +45,55 @@ func (v *MockSigstoreVerifier) Verify(attestations []*api.Attestation, policy ve
 
 	results := []*AttestationProcessingResult{&result}
 
-	return &SigstoreResults{
-		VerifyResults: results,
-	}
+	return results, nil
 }
 
 func NewMockSigstoreVerifier(t *testing.T) *MockSigstoreVerifier {
-	return &MockSigstoreVerifier{t}
+	result := BuildSigstoreJsMockResult(t)
+	results := []*AttestationProcessingResult{&result}
+
+	return &MockSigstoreVerifier{t, results}
+}
+
+func NewMockSigstoreVerifierWithMockResults(t *testing.T, mockResults []*AttestationProcessingResult) *MockSigstoreVerifier {
+	return &MockSigstoreVerifier{t, mockResults}
 }
 
 type FailSigstoreVerifier struct{}
 
-func (v *FailSigstoreVerifier) Verify(attestations []*api.Attestation, policy verify.PolicyBuilder) *SigstoreResults {
-	return &SigstoreResults{
-		Error: fmt.Errorf("failed to verify attestations"),
+func (v *FailSigstoreVerifier) Verify([]*api.Attestation, verify.PolicyBuilder) ([]*AttestationProcessingResult, error) {
+	return nil, fmt.Errorf("failed to verify attestations")
+}
+
+func BuildMockResult(b *bundle.Bundle, buildConfigURI, buildSignerURI, sourceRepoOwnerURI, sourceRepoURI, issuer string) AttestationProcessingResult {
+	statement := &in_toto.Statement{}
+	statement.PredicateType = SLSAPredicateV1
+
+	return AttestationProcessingResult{
+		Attestation: &api.Attestation{
+			Bundle: b,
+		},
+		VerificationResult: &verify.VerificationResult{
+			Statement: statement,
+			Signature: &verify.SignatureVerificationResult{
+				Certificate: &certificate.Summary{
+					BuildConfigURI:           buildConfigURI,
+					BuildSignerURI:           buildSignerURI,
+					Issuer:                   issuer,
+					SourceRepositoryOwnerURI: sourceRepoOwnerURI,
+					SourceRepositoryURI:      sourceRepoURI,
+				},
+			},
+		},
 	}
+}
+
+func BuildSigstoreJsMockResult(t *testing.T) AttestationProcessingResult {
+	bundle := data.SigstoreBundle(t)
+	buildConfigURI := "https://github.com/sigstore/sigstore-js/.github/workflows/build.yml@refs/heads/main"
+	buildSignerURI := "https://github.com/github/example/.github/workflows/release.yml@refs/heads/main"
+	sourceRepoOwnerURI := "https://github.com/sigstore"
+	sourceRepoURI := "https://github.com/sigstore/sigstore-js"
+	issuer := "https://token.actions.githubusercontent.com"
+	return BuildMockResult(bundle, buildConfigURI, buildSignerURI, sourceRepoOwnerURI, sourceRepoURI, issuer)
 }

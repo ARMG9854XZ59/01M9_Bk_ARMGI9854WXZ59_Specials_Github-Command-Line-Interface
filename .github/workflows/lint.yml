@@ -1,58 +1,81 @@
 name: Lint
 on:
   push:
+    branches:
+      - trunk
     paths:
       - "**.go"
       - go.mod
       - go.sum
+      - ".github/golangci-lint-version"
+      - ".github/govulncheck-version"
+      - ".github/licenses.tmpl"
+      - ".github/workflows/lint.yml"
+      - "script/licenses"
   pull_request:
     paths:
       - "**.go"
       - go.mod
       - go.sum
-
+      - ".github/golangci-lint-version"
+      - ".github/govulncheck-version"
+      - ".github/licenses.tmpl"
+      - ".github/workflows/lint.yml"
+      - "script/licenses"
 permissions:
   contents: read
-
 jobs:
   lint:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
-      - name: Verify dependencies
+      - name: Ensure Go source and modules are up to date
         run: |
-          go mod verify
-          go mod download
+          go mod tidy -diff
+          go fix -diff ./...
 
-          LINT_VERSION=1.59.1
-          curl -fsSL https://github.com/golangci/golangci-lint/releases/download/v${LINT_VERSION}/golangci-lint-${LINT_VERSION}-linux-amd64.tar.gz | \
-            tar xz --strip-components 1 --wildcards \*/golangci-lint
-          mkdir -p bin && mv golangci-lint bin/
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version-file: .github/golangci-lint-version
 
-      - name: Run checks
+      # Verify that license generation succeeds for all release platforms (GOOS/GOARCH).
+      # This catches issues like new dependencies with unrecognized licenses before release time.
+      #
+      # actions/setup-go does not setup the installed toolchain to be preferred over the system install,
+      # which causes go-licenses to raise "Package ... does not have module info" errors.
+      # For more information, https://github.com/google/go-licenses/issues/244#issuecomment-1885098633
+      - name: Verify license generation
         run: |
-          STATUS=0
-          assert-nothing-changed() {
-            local diff
-            "$@" >/dev/null || return 1
-            if ! diff="$(git diff -U1 --color --exit-code)"; then
-              printf '\e[31mError: running `\e[1m%s\e[22m` results in modifications that you must check into version control:\e[0m\n%s\n\n' "$*" "$diff" >&2
-              git checkout -- .
-              STATUS=1
-            fi
-          }
+          export GOROOT=$(go env GOROOT)
+          export PATH=${GOROOT}/bin:$PATH
+          make licenses-check
 
-          assert-nothing-changed go fmt ./...
-          assert-nothing-changed go mod tidy
+  # Discover vulnerabilities within Go standard libraries used to build GitHub CLI using govulncheck.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-          bin/golangci-lint run --out-format=github-actions --timeout=3m || STATUS=$?
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
 
-          exit $STATUS
+      # `govulncheck` exits unsuccessfully if vulnerabilities are found, providing results in stdout.
+      # See https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck#hdr-Exit_codes for more information on exit codes.
+      #
+      # On go1.25+, To make `-mode binary` work we need to make sure the binary is built with `go build -buildvcs=false`
+      # Since our builds do not use `-buildvcs=false`, we run in source mode here instead.
+      - name: Check Go vulnerabilities
+        run: |
+          govulncheck_version=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' .github/govulncheck-version)
+          go run "golang.org/x/vuln/cmd/govulncheck@$govulncheck_version" ./...

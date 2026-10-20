@@ -11,6 +11,7 @@ import (
 	"github.com/cli/cli/v2/internal/docs"
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/telemetry"
 	"github.com/cli/cli/v2/pkg/cmd/root"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/extensions"
@@ -50,10 +51,10 @@ func run(args []string) error {
 		IOStreams: ios,
 		Browser:   &browser{},
 		Config: func() (gh.Config, error) {
-			return config.NewFromString(""), nil
+			return config.NewMockConfigFromString(""), nil
 		},
 		ExtensionManager: &em{},
-	}, "", "")
+	}, &telemetry.NoOpService{}, "", "")
 	rootCmd.InitDefaultHelpCmd()
 
 	if err := os.MkdirAll(*dir, 0755); err != nil {
@@ -127,3 +128,7 @@ func (e *em) Create(_ string, _ extensions.ExtTemplateType) error {
 }
 
 func (e *em) EnableDryRunMode() {}
+
+func (e *em) UpdateDir(_ string) string {
+	return ""
+}

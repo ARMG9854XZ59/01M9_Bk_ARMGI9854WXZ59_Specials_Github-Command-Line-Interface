@@ -10,23 +10,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
+	"slices"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf16"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
-	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/run/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/go-gh/v2/pkg/asciisanitizer"
 	"github.com/spf13/cobra"
+	"golang.org/x/text/transform"
 )
 
 type RunLogCache struct {
@@ -116,9 +115,17 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 		Long: heredoc.Docf(`
 			View a summary of a workflow run.
 
-			This command does not support authenticating via fine grained PATs
-			as it is not currently possible to create a PAT with the %[1]schecks:read%[1]s permission.
-		`, "`"),
+			Due to platform limitations, %[1]sgh%[1]s may not always be able to associate jobs with their
+			corresponding logs when using the primary method of fetching logs in zip format.
+
+			In such cases, %[1]sgh%[1]s will attempt to fetch logs for each job individually via the API.
+			This fallback is slower and more resource-intensive. If more than 25 job logs are missing,
+			the operation will fail with an error.
+
+			Additionally, due to similar platform constraints, some log lines may not be
+			associated with a specific step within a job. In these cases, the step name will
+			appear as %[1]sUNKNOWN STEP%[1]s in the log output.
+		`, "`", maxAPILogFetchers),
 		Args: cobra.MaximumNArgs(1),
 		Example: heredoc.Doc(`
 			# Interactively select a run to view, optionally selecting a single job
@@ -254,11 +261,12 @@ func runView(opts *ViewOptions) error {
 
 	if shouldFetchJobs(opts) {
 		opts.IO.StartProgressIndicator()
-		jobs, err = shared.GetJobs(client, repo, run, attempt)
+		jobs, err = shared.GetJobs(client, repo, run.ID, safeurl.NewImmutableSafeURL(run.JobsURL), attempt)
 		opts.IO.StopProgressIndicator()
 		if err != nil {
 			return err
 		}
+		run.Jobs = jobs
 	}
 
 	if opts.Prompt && len(jobs) > 1 {
@@ -292,11 +300,12 @@ func runView(opts *ViewOptions) error {
 
 	if selectedJob == nil && len(jobs) == 0 {
 		opts.IO.StartProgressIndicator()
-		jobs, err = shared.GetJobs(client, repo, run, attempt)
+		jobs, err = shared.GetJobs(client, repo, run.ID, safeurl.NewImmutableSafeURL(run.JobsURL), attempt)
 		opts.IO.StopProgressIndicator()
 		if err != nil {
 			return fmt.Errorf("failed to get jobs: %w", err)
 		}
+		run.Jobs = jobs
 	} else if selectedJob != nil {
 		jobs = []shared.Job{*selectedJob}
 	}
@@ -318,9 +327,23 @@ func runView(opts *ViewOptions) error {
 		}
 		defer runLogZip.Close()
 
-		attachRunLog(&runLogZip.Reader, jobs)
+		zlm := getZipLogMap(&runLogZip.Reader, jobs)
+		segments, err := populateLogSegments(httpClient, repo, jobs, zlm, opts.LogFailed)
+		if err != nil {
+			if errors.Is(err, errTooManyAPILogFetchers) {
+				return fmt.Errorf("too many API requests needed to fetch logs; try narrowing down to a specific job with the `--job` option")
+			}
+			return err
+		}
 
-		return displayRunLog(opts.IO.Out, jobs, opts.LogFailed)
+		if err := displayLogSegments(opts.IO.Out, segments); err != nil {
+			return err
+		}
+
+		if opts.ExitStatus && shared.IsFailureState(run.Conclusion) {
+			return cmdutil.SilentError
+		}
+		return nil
 	}
 
 	prNumber := ""
@@ -397,7 +420,7 @@ func runView(opts *ViewOptions) error {
 			for _, a := range artifacts {
 				expiredBadge := ""
 				if a.Expired {
-					expiredBadge = cs.Gray(" (expired)")
+					expiredBadge = cs.Muted(" (expired)")
 				}
 				fmt.Fprintf(out, "%s%s\n", a.Name, expiredBadge)
 			}
@@ -411,7 +434,7 @@ func runView(opts *ViewOptions) error {
 		} else {
 			fmt.Fprintf(out, "For more information about a job, try: gh run view --job=<job-id>\n")
 		}
-		fmt.Fprintf(out, cs.Gray("View this run on GitHub: %s\n"), run.URL)
+		fmt.Fprintln(out, cs.Mutedf("View this run on GitHub: %s", run.URL))
 
 		if opts.ExitStatus && shared.IsFailureState(run.Conclusion) {
 			return cmdutil.SilentError
@@ -423,7 +446,7 @@ func runView(opts *ViewOptions) error {
 		} else {
 			fmt.Fprintf(out, "To see the full job log, try: gh run view --log --job=%d\n", selectedJob.ID)
 		}
-		fmt.Fprintf(out, cs.Gray("View this run on GitHub: %s\n"), run.URL)
+		fmt.Fprintln(out, cs.Mutedf("View this run on GitHub: %s", run.URL))
 
 		if opts.ExitStatus && shared.IsFailureState(selectedJob.Conclusion) {
 			return cmdutil.SilentError
@@ -438,30 +461,29 @@ func shouldFetchJobs(opts *ViewOptions) bool {
 		return true
 	}
 	if opts.Exporter != nil {
-		for _, f := range opts.Exporter.Fields() {
-			if f == "jobs" {
-				return true
-			}
+		if slices.Contains(opts.Exporter.Fields(), "jobs") {
+			return true
 		}
 	}
 	return false
 }
 
-func getLog(httpClient *http.Client, logURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequest("GET", logURL, nil)
+func getLog(httpClient *http.Client, hostname string, logPath safeurl.SafeURL) (io.ReadCloser, error) {
+	// The response body is the log archive, which is handed to the caller rather than decoded.
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	resp, err := api.NewClientFromHTTP(httpClient).Request(hostname, http.MethodGet, logPath.String(), nil)
 	if err != nil {
+		if httpErr, ok := errors.AsType[api.HTTPError](err); ok && httpErr.StatusCode == http.StatusNotFound {
+			return nil, errors.New("log not found")
+		}
 		return nil, err
 	}
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode == 404 {
-		return nil, errors.New("log not found")
-	} else if resp.StatusCode != 200 {
-		return nil, api.HandleHTTPError(resp)
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, api.UnexpectedStatusError(resp)
 	}
 
 	return resp.Body, nil
@@ -476,15 +498,19 @@ func getRunLog(cache RunLogCache, httpClient *http.Client, repo ghrepo.Interface
 
 	if !isCached {
 		// Run log does not exist in cache so retrieve and store it
-		logURL := fmt.Sprintf("%srepos/%s/actions/runs/%d/logs",
-			ghinstance.RESTPrefix(repo.RepoHost()), ghrepo.FullName(repo), run.ID)
-
-		if attempt > 0 {
-			logURL = fmt.Sprintf("%srepos/%s/actions/runs/%d/attempts/%d/logs",
-				ghinstance.RESTPrefix(repo.RepoHost()), ghrepo.FullName(repo), run.ID, attempt)
+		logPath, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "actions", "runs", strconv.FormatInt(run.ID, 10), "logs")
+		if err != nil {
+			return nil, err
 		}
 
-		resp, err := getLog(httpClient, logURL)
+		if attempt > 0 {
+			logPath, err = safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "actions", "runs", strconv.FormatInt(run.ID, 10), "attempts", strconv.FormatUint(attempt, 10), "logs")
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		resp, err := getLog(httpClient, repo.RepoHost(), logPath)
 		if err != nil {
 			return nil, err
 		}
@@ -531,145 +557,40 @@ func promptForJob(prompter shared.Prompter, cs *iostreams.ColorScheme, jobs []sh
 	return nil, nil
 }
 
-const JOB_NAME_MAX_LENGTH = 90
-
-func logFilenameRegexp(job shared.Job, step shared.Step) *regexp.Regexp {
-	// As described in https://github.com/cli/cli/issues/5011#issuecomment-1570713070, there are a number of steps
-	// the server can take when producing the downloaded zip file that can result in a mismatch between the job name
-	// and the filename in the zip including:
-	//  * Removing characters in the job name that aren't allowed in file paths
-	//  * Truncating names that are too long for zip files
-	//  * Adding collision deduplicating numbers for jobs with the same name
-	//
-	// We are hesitant to duplicate all the server logic due to the fragility but it may be unavoidable. Currently, we:
-	// * Strip `/` which occur when composite action job names are constructed of the form `<JOB_NAME`> / <ACTION_NAME>`
-	// * Truncate long job names
-	//
-	sanitizedJobName := strings.ReplaceAll(job.Name, "/", "")
-	sanitizedJobName = truncateAsUTF16(sanitizedJobName, JOB_NAME_MAX_LENGTH)
-	re := fmt.Sprintf(`^%s\/%d_.*\.txt`, regexp.QuoteMeta(sanitizedJobName), step.Number)
-	return regexp.MustCompile(re)
-}
-
-/*
-If you're reading this comment by necessity, I'm sorry and if you're reading it for fun, you're welcome, you weirdo.
-
-What is the length of this string "a😅😅"? If you said 9 you'd be right. If you said 3 or 5 you might also be right!
-
-Here's a summary:
-
-	"a" takes 1 byte (`\x61`)
-	"😅" takes 4 `bytes` (`\xF0\x9F\x98\x85`)
-	"a😅😅" therefore takes 9 `bytes`
-	In Go `len("a😅😅")` is 9 because the `len` builtin counts `bytes`
-	In Go `len([]rune("a😅😅"))` is 3 because each `rune` is 4 `bytes` so each character fits within a `rune`
-	In C# `"a😅😅".Length` is 5 because `.Length` counts `Char` objects, `Chars` hold 2 bytes, and "😅" takes 2 Chars.
-
-But wait, what does C# have to do with anything? Well the server is running C#. Which server? The one that serves log
-files to us in `.zip` format of course! When the server is constructing the zip file to avoid running afoul of a 260
-byte zip file path length limitation, it applies transformations to various strings in order to limit their length.
-In C#, the server truncates strings with this function:
-
-	public static string TruncateAfter(string str, int max)
-	{
-		string result = str.Length > max ? str.Substring(0, max) : str;
-		result = result.Trim();
-		return result;
-	}
-
-This seems like it would be easy enough to replicate in Go but as we already discovered, the length of a string isn't
-as obvious as it might seem. Since C# uses UTF-16 encoding for strings, and Go uses UTF-8 encoding and represents
-characters by runes (which are an alias of int32) we cannot simply slice the string without any further consideration.
-Instead, we need to encode the string as UTF-16 bytes, slice it and then decode it back to UTF-8.
-
-Interestingly, in C# length and substring both act on the Char type so it's possible to slice into the middle of
-a visual, "representable" character. For example we know `"a😅😅".Length` = 5 (1+2+2) and therefore Substring(0,4)
-results in the final character being cleaved in two, resulting in "a😅�". Since our int32 runes are being encoded as
-2 uint16 elements, we also mimic this behaviour by slicing into the UTF-16 encoded string.
-
-Here's a program you can put into a dotnet playground to see how C# works:
-
-	using System;
-	public class Program {
-	  public static void Main() {
-	    string s = "a😅😅";
-	    Console.WriteLine("{0} {1}", s.Length, s);
-	    string t = TruncateAfter(s, 4);
-	    Console.WriteLine("{0} {1}", t.Length, t);
-	  }
-	  public static string TruncateAfter(string str, int max) {
-	    string result = str.Length > max ? str.Substring(0, max) : str;
-	    return result.Trim();
-	  }
-	}
-
-This will output:
-5 a😅😅
-4 a😅�
-*/
-func truncateAsUTF16(str string, max int) string {
-	// Encode the string to UTF-16 to count code units
-	utf16Encoded := utf16.Encode([]rune(str))
-	if len(utf16Encoded) > max {
-		// Decode back to UTF-8 up to the max length
-		str = string(utf16.Decode(utf16Encoded[:max]))
-	}
-	return strings.TrimSpace(str)
-}
-
-// This function takes a zip file of logs and a list of jobs.
-// Structure of zip file
-//
-//	zip/
-//	├── jobname1/
-//	│   ├── 1_stepname.txt
-//	│   ├── 2_anotherstepname.txt
-//	│   ├── 3_stepstepname.txt
-//	│   └── 4_laststepname.txt
-//	└── jobname2/
-//	    ├── 1_stepname.txt
-//	    └── 2_somestepname.txt
-//
-// It iterates through the list of jobs and tries to find the matching
-// log in the zip file. If the matching log is found it is attached
-// to the job.
-func attachRunLog(rlz *zip.Reader, jobs []shared.Job) {
-	for i, job := range jobs {
-		for j, step := range job.Steps {
-			re := logFilenameRegexp(job, step)
-			for _, file := range rlz.File {
-				if re.MatchString(file.Name) {
-					jobs[i].Steps[j].Log = file
-					break
-				}
-			}
+func displayLogSegments(w io.Writer, segments []logSegment) error {
+	for _, segment := range segments {
+		stepName := "UNKNOWN STEP"
+		if segment.step != nil {
+			stepName = segment.step.Name
 		}
-	}
-}
 
-func displayRunLog(w io.Writer, jobs []shared.Job, failed bool) error {
-	for _, job := range jobs {
-		steps := job.Steps
-		sort.Sort(steps)
-		for _, step := range steps {
-			if failed && !shared.IsFailureState(step.Conclusion) {
-				continue
-			}
-			if step.Log == nil {
-				continue
-			}
-			prefix := fmt.Sprintf("%s\t%s\t", job.Name, step.Name)
-			f, err := step.Log.Open()
-			if err != nil {
+		rc, err := segment.fetcher.GetLog()
+		if err != nil {
+			return err
+		}
+
+		err = func() error {
+			defer rc.Close()
+			prefix := fmt.Sprintf("%s\t%s\t", segment.job.Name, stepName)
+			if err := copyLogWithLinePrefix(w, rc, prefix); err != nil {
 				return err
 			}
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				fmt.Fprintf(w, "%s%s\n", prefix, scanner.Text())
-			}
-			f.Close()
+			return nil
+		}()
+
+		if err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func copyLogWithLinePrefix(w io.Writer, r io.Reader, prefix string) error {
+	sanitized := transform.NewReader(r, &asciisanitizer.Sanitizer{})
+	scanner := bufio.NewScanner(sanitized)
+	for scanner.Scan() {
+		fmt.Fprintf(w, "%s%s\n", prefix, scanner.Text())
+	}
 	return nil
 }

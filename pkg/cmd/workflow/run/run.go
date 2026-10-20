@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/cmd/workflow/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
@@ -25,6 +29,7 @@ type RunOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
+	Detector   fd.Detector
 	Prompter   iprompter
 
 	Selector  string
@@ -64,6 +69,8 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 			- Interactively
 			- Via %[1]s-f/--raw-field%[1]s or %[1]s-F/--field%[1]s flags
 			- As JSON, via standard input
+
+			The created workflow run URL will be returned if available.
 		`, "`"),
 		Example: heredoc.Doc(`
 			# Have gh prompt you for what workflow you'd like to run and interactively collect inputs
@@ -128,7 +135,7 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 			return runRun(opts)
 		},
 	}
-	cmd.Flags().StringVarP(&opts.Ref, "ref", "r", "", "The branch or tag name which contains the version of the workflow file you'd like to run")
+	cmd.Flags().StringVarP(&opts.Ref, "ref", "r", "", "Branch or tag name which contains the version of the workflow file you'd like to run")
 	cmd.Flags().StringArrayVarP(&opts.MagicFields, "field", "F", nil, "Add a string parameter in `key=value` format, respecting @ syntax (see \"gh help api\").")
 	cmd.Flags().StringArrayVarP(&opts.RawFields, "raw-field", "f", nil, "Add a string parameter in `key=value` format")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Read workflow inputs as JSON via STDIN")
@@ -188,7 +195,7 @@ type InputAnswer struct {
 	providedInputs map[string]string
 }
 
-func (ia *InputAnswer) WriteAnswer(name string, value interface{}) error {
+func (ia *InputAnswer) WriteAnswer(name string, value any) error {
 	if s, ok := value.(string); ok {
 		ia.providedInputs[name] = s
 		return nil
@@ -260,6 +267,11 @@ func runRun(opts *RunOptions) error {
 		return err
 	}
 
+	if opts.Detector == nil {
+		cachedClient := api.NewCachedHTTPClient(c, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, repo.RepoHost())
+	}
+
 	ref := opts.Ref
 
 	if ref == "" {
@@ -273,8 +285,7 @@ func runRun(opts *RunOptions) error {
 	workflow, err := shared.ResolveWorkflow(opts.Prompter,
 		opts.IO, client, repo, opts.Prompt, opts.Selector, states)
 	if err != nil {
-		var fae shared.FilteredAllError
-		if errors.As(err, &fae) {
+		if _, ok := errors.AsType[shared.FilteredAllError](err); ok {
 			return errors.New("no workflows are enabled on this repository")
 		}
 		return err
@@ -303,34 +314,80 @@ func runRun(opts *RunOptions) error {
 		}
 	}
 
-	path := fmt.Sprintf("repos/%s/actions/workflows/%d/dispatches",
-		ghrepo.FullName(repo), workflow.ID)
+	features, err := opts.Detector.ActionsFeatures()
+	if err != nil {
+		return err
+	}
 
-	requestByte, err := json.Marshal(map[string]interface{}{
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "actions", "workflows", strconv.FormatInt(workflow.ID, 10), "dispatches")
+	if err != nil {
+		return err
+	}
+
+	requestBody := map[string]any{
 		"ref":    ref,
 		"inputs": providedInputs,
-	})
+	}
+
+	// TODO workflowDispatchRunDetailsCleanup
+	// We will have to always set the `return_run_details` field to true, unless
+	// we opt into the new REST API version, which will probably return the
+	// details by default.
+	if features.DispatchRunDetails {
+		requestBody["return_run_details"] = true
+	}
+
+	requestByte, err := json.Marshal(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to serialize workflow inputs: %w", err)
 	}
 
 	body := bytes.NewReader(requestByte)
 
-	err = client.REST(repo.RepoHost(), "POST", path, body, nil)
+	var response struct {
+		WorkflowRunID int64  `json:"workflow_run_id"`
+		RunURL        string `json:"run_url"`
+		HtmlURL       string `json:"html_url"`
+	}
+
+	// Note that the workflow dispatch endpoint used to return 204 No Content
+	// (with no body, obviously). Now it's possible for the endpoint to also
+	// return 200 OK with created run details. So, we have to handle both cases
+	// because old GHE versions still return 204. Even on github.com, we
+	// may still get 204 for any reason.
+	//
+	// Our REST client library is smart enough to ignore JSON unmarshal when it
+	// receives 204, so we're safe here anyway.
+	//
+	// As a related note, the new REST API version (which will come with breaking
+	// changes) will probably default to return 200 + run details.
+	err = client.REST(repo.RepoHost(), "POST", path.String(), body, &response)
 	if err != nil {
 		return fmt.Errorf("could not create workflow dispatch event: %w", err)
 	}
 
 	if opts.IO.IsStdoutTTY() {
-		out := opts.IO.Out
 		cs := opts.IO.ColorScheme()
-		fmt.Fprintf(out, "%s Created workflow_dispatch event for %s at %s\n",
+		fmt.Fprintf(opts.IO.Out, "%s Created workflow_dispatch event for %s at %s\n",
 			cs.SuccessIcon(), cs.Cyan(workflow.Base()), cs.Bold(ref))
 
-		fmt.Fprintln(out)
+		if response.HtmlURL != "" {
+			fmt.Fprintln(opts.IO.Out, response.HtmlURL)
+		}
 
-		fmt.Fprintf(out, "To see runs for this workflow, try: %s\n",
-			cs.Boldf("gh run list --workflow=%s", workflow.Base()))
+		fmt.Fprintln(opts.IO.Out)
+
+		if response.WorkflowRunID != 0 {
+			fmt.Fprintf(opts.IO.Out, "To see the created workflow run, try: %s\n",
+				cs.Boldf("gh run view %d", response.WorkflowRunID))
+		}
+
+		fmt.Fprintf(opts.IO.Out, "To see runs for this workflow, try: %s\n",
+			cs.Boldf("gh run list --workflow=%q", workflow.Base()))
+	} else {
+		if response.HtmlURL != "" {
+			fmt.Fprintln(opts.IO.Out, response.HtmlURL)
+		}
 	}
 
 	return nil

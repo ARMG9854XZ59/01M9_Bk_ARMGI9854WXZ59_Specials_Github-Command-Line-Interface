@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -99,6 +100,11 @@ func repoCreate(client *http.Client, hostname string, input repoCreateInput) (*a
 		isOrg = owner.IsOrganization()
 	}
 
+	isInternal := strings.ToLower(input.Visibility) == "internal"
+	if isInternal && !isOrg {
+		return nil, fmt.Errorf("internal repositories can only be created within an organization")
+	}
+
 	if input.TemplateRepositoryID != "" {
 		var response struct {
 			CloneTemplateRepository struct {
@@ -114,7 +120,7 @@ func repoCreate(client *http.Client, hostname string, input repoCreateInput) (*a
 			}
 		}
 
-		variables := map[string]interface{}{
+		variables := map[string]any{
 			"input": cloneTemplateRepositoryInput{
 				Name:               input.Name,
 				Description:        input.Description,
@@ -142,7 +148,7 @@ func repoCreate(client *http.Client, hostname string, input repoCreateInput) (*a
 		}
 
 		if !input.HasWikiEnabled || !input.HasIssuesEnabled || input.HomepageURL != "" {
-			updateVariables := map[string]interface{}{
+			updateVariables := map[string]any{
 				"input": updateRepositoryInput{
 					RepositoryID:     response.CloneTemplateRepository.Repository.ID,
 					HasWikiEnabled:   input.HasWikiEnabled,
@@ -181,9 +187,15 @@ func repoCreate(client *http.Client, hostname string, input repoCreateInput) (*a
 			InitReadme:        input.InitReadme,
 		}
 
-		path := "user/repos"
+		path, err := safeurl.JoinPath("user", "repos")
+		if err != nil {
+			return nil, err
+		}
 		if isOrg {
-			path = fmt.Sprintf("orgs/%s/repos", input.OwnerLogin)
+			path, err = safeurl.JoinPath("orgs", input.OwnerLogin, "repos")
+			if err != nil {
+				return nil, err
+			}
 			inputv3.Visibility = strings.ToLower(input.Visibility)
 		}
 
@@ -206,7 +218,7 @@ func repoCreate(client *http.Client, hostname string, input repoCreateInput) (*a
 		}
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": createRepositoryInput{
 			Name:             input.Name,
 			Description:      input.Description,
@@ -249,7 +261,11 @@ func (r *ownerResponse) IsOrganization() bool {
 
 func resolveOwner(client *api.Client, hostname, orgName string) (*ownerResponse, error) {
 	var response ownerResponse
-	err := client.REST(hostname, "GET", fmt.Sprintf("users/%s", orgName), nil, &response)
+	u, err := safeurl.JoinPath("users", orgName)
+	if err != nil {
+		return nil, err
+	}
+	err = client.REST(hostname, "GET", u.String(), nil, &response)
 	return &response, err
 }
 
@@ -263,14 +279,18 @@ type teamResponse struct {
 
 func resolveOrganizationTeam(client *api.Client, hostname, orgName, teamSlug string) (*teamResponse, error) {
 	var response teamResponse
-	err := client.REST(hostname, "GET", fmt.Sprintf("orgs/%s/teams/%s", orgName, teamSlug), nil, &response)
+	u, err := safeurl.JoinPath("orgs", orgName, "teams", teamSlug)
+	if err != nil {
+		return nil, err
+	}
+	err = client.REST(hostname, "GET", u.String(), nil, &response)
 	return &response, err
 }
 
 func listTemplateRepositories(client *http.Client, hostname, owner string) ([]api.Repository, error) {
 	ownerConnection := "repositoryOwner(login: $owner)"
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"perPage": githubv4.Int(100),
 		"owner":   githubv4.String(owner),
 	}
@@ -332,28 +352,6 @@ func listTemplateRepositories(client *http.Client, hostname, owner string) ([]ap
 	}
 
 	return templateRepositories, nil
-}
-
-// listGitIgnoreTemplates uses API v3 here because gitignore template isn't supported by GraphQL yet.
-func listGitIgnoreTemplates(httpClient *http.Client, hostname string) ([]string, error) {
-	var gitIgnoreTemplates []string
-	client := api.NewClientFromHTTP(httpClient)
-	err := client.REST(hostname, "GET", "gitignore/templates", nil, &gitIgnoreTemplates)
-	if err != nil {
-		return []string{}, err
-	}
-	return gitIgnoreTemplates, nil
-}
-
-// listLicenseTemplates uses API v3 here because license template isn't supported by GraphQL yet.
-func listLicenseTemplates(httpClient *http.Client, hostname string) ([]api.License, error) {
-	var licenseTemplates []api.License
-	client := api.NewClientFromHTTP(httpClient)
-	err := client.REST(hostname, "GET", "licenses", nil, &licenseTemplates)
-	if err != nil {
-		return nil, err
-	}
-	return licenseTemplates, nil
 }
 
 // Returns the current username and any orgs that user is a member of.

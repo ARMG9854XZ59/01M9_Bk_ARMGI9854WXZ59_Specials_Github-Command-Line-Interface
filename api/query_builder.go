@@ -20,6 +20,25 @@ func shortenQuery(q string) string {
 	return strings.Map(squeeze, q)
 }
 
+var assignedActors = shortenQuery(`
+	assignedActors(first: 10) {
+		nodes {
+			...on User {
+				id,
+				login,
+				name,
+				__typename
+			}
+			...on Bot {
+				id,
+				login,
+				__typename
+			}
+		},
+		totalCount
+	}
+`)
+
 var issueComments = shortenQuery(`
 	comments(first: 100) {
 		nodes {
@@ -56,12 +75,35 @@ var issueCommentLast = shortenQuery(`
 	}
 `)
 
+var issueClosedByPullRequestsReferences = shortenQuery(`
+	closedByPullRequestsReferences(first: 100) {
+		nodes {
+			id,
+			number,
+			url,
+			repository {
+				id,
+				name,
+				owner {
+					id,
+					login
+				}
+			}
+		}
+		pageInfo{hasNextPage,endCursor}
+	}
+`)
+
+// prReviewRequests includes ...on Bot to support Copilot as a reviewer on github.com.
+// On GHES, Bot is not part of the RequestedReviewer union, but the fragment is
+// silently ignored (verified on GHES 3.19).
 var prReviewRequests = shortenQuery(`
 	reviewRequests(first: 100) {
 		nodes {
 			requestedReviewer {
 				__typename,
-				...on User{login},
+				...on User{login,name},
+				...on Bot{login},
 				...on Team{
 					organization{login}
 					name,
@@ -106,7 +148,8 @@ var prFiles = shortenQuery(`
 		nodes {
 			additions,
 			deletions,
-			path
+			path,
+			changeType
 		}
 	}
 `)
@@ -129,6 +172,25 @@ var prCommits = shortenQuery(`
 				authoredDate
 			}
 		}
+	}
+`)
+
+var prClosingIssuesReferences = shortenQuery(`
+	closingIssuesReferences(first: 100) {
+		nodes {
+			id,
+			number,
+			url,
+			repository {
+				id,
+				name,
+				owner {
+					id,
+					login
+				}
+			}
+		}
+		pageInfo{hasNextPage,endCursor}
 	}
 `)
 
@@ -277,6 +339,13 @@ var sharedIssuePRFields = []string{
 var issueOnlyFields = []string{
 	"isPinned",
 	"stateReason",
+	"closedByPullRequestsReferences",
+	"issueType",
+	"parent",
+	"subIssues",
+	"subIssuesSummary",
+	"blockedBy",
+	"blocking",
 }
 
 var IssueFields = append(sharedIssuePRFields, issueOnlyFields...)
@@ -285,7 +354,9 @@ var PullRequestFields = append(sharedIssuePRFields,
 	"additions",
 	"autoMergeRequest",
 	"baseRefName",
+	"baseRefOid",
 	"changedFiles",
+	"closingIssuesReferences",
 	"commits",
 	"deletions",
 	"files",
@@ -322,9 +393,11 @@ func IssueGraphQL(fields []string) string {
 		case "headRepositoryOwner":
 			q = append(q, `headRepositoryOwner{id,login,...on User{name}}`)
 		case "headRepository":
-			q = append(q, `headRepository{id,name}`)
+			q = append(q, `headRepository{id,name,nameWithOwner}`)
 		case "assignees":
-			q = append(q, `assignees(first:100){nodes{id,login,name},totalCount}`)
+			q = append(q, `assignees(first:100){nodes{id,login,name,databaseId},totalCount}`)
+		case "assignedActors":
+			q = append(q, assignedActors)
 		case "labels":
 			q = append(q, `labels(first:100){nodes{id,name,description,color},totalCount}`)
 		case "projectCards":
@@ -333,6 +406,9 @@ func IssueGraphQL(fields []string) string {
 			q = append(q, `projectItems(first:100){nodes{id, project{id,title}, status:fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue{optionId,name}}},totalCount}`)
 		case "milestone":
 			q = append(q, `milestone{number,title,description,dueOn}`)
+		case "repository":
+			// Selects every field PRRepository declares.
+			q = append(q, `repository{id,name,nameWithOwner,databaseId,viewerPermission}`)
 		case "reactionGroups":
 			q = append(q, `reactionGroups{content,users{totalCount}}`)
 		case "mergeCommit":
@@ -365,6 +441,22 @@ func IssueGraphQL(fields []string) string {
 			q = append(q, StatusCheckRollupGraphQLWithoutCountByState(""))
 		case "statusCheckRollupWithCountByState": // pseudo-field
 			q = append(q, StatusCheckRollupGraphQLWithCountByState())
+		case "closingIssuesReferences":
+			q = append(q, prClosingIssuesReferences)
+		case "closedByPullRequestsReferences":
+			q = append(q, issueClosedByPullRequestsReferences)
+		case "issueType":
+			q = append(q, `issueType{id,name,description,color}`)
+		case "parent":
+			q = append(q, `parent{id,number,title,url,state,repository{nameWithOwner}}`)
+		case "subIssues":
+			q = append(q, `subIssues(first:100){nodes{id,number,title,url,state,repository{nameWithOwner}},totalCount}`)
+		case "subIssuesSummary":
+			q = append(q, `subIssuesSummary{total,completed,percentCompleted}`)
+		case "blockedBy":
+			q = append(q, `blockedBy(first:50){nodes{id,number,title,url,state,repository{nameWithOwner}},totalCount}`)
+		case "blocking":
+			q = append(q, `blocking(first:50){nodes{id,number,title,url,state,repository{nameWithOwner}},totalCount}`)
 		default:
 			q = append(q, field)
 		}
@@ -400,6 +492,7 @@ var RepositoryFields = []string{
 	"createdAt",
 	"pushedAt",
 	"updatedAt",
+	"archivedAt",
 
 	"isBlankIssuesEnabled",
 	"isSecurityPolicyEnabled",

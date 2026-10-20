@@ -26,8 +26,7 @@ func (gc *Command) Run() error {
 	err := run.PrepareCmd(gc.Cmd).Run()
 	if err != nil {
 		ge := GitError{err: err, Stderr: stderr.String()}
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if exitError, ok := errors.AsType[*exec.ExitError](err); ok {
 			ge.ExitCode = exitError.ExitCode()
 		}
 		return &ge
@@ -43,10 +42,19 @@ func (gc *Command) Output() ([]byte, error) {
 	out, err := run.PrepareCmd(gc.Cmd).Output()
 	if err != nil {
 		ge := GitError{err: err}
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+
+		// In real implementation, this should be an exec.ExitError, as below,
+		// but the tests use a different type because exec.ExitError are difficult
+		// to create. We want to get the exit code and stderr, but stderr
+		// is not a method and so tests can't access it.
+		// THIS MEANS THAT TESTS WILL NOT CORRECTLY HAVE STDERR SET,
+		// but at least tests can get the exit code.
+		if exitErrorWithExitCode, ok := errors.AsType[errWithExitCode](err); ok {
+			ge.ExitCode = exitErrorWithExitCode.ExitCode()
+		}
+
+		if exitError, ok := errors.AsType[*exec.ExitError](err); ok {
 			ge.Stderr = string(exitError.Stderr)
-			ge.ExitCode = exitError.ExitCode()
 		}
 		err = &ge
 	}

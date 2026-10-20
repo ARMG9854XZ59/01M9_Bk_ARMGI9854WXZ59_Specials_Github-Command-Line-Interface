@@ -218,7 +218,7 @@ func TestListRun(t *testing.T) {
 			wantStdout: heredoc.Doc(`
 
 				Showing 2 of 2 labels in OWNER/REPO
-				
+
 				NAME  DESCRIPTION           COLOR
 				bug   This is a bug label   #d73a4a
 				docs  This is a docs label  #ffa8da
@@ -296,7 +296,7 @@ func TestListRun(t *testing.T) {
 			name:       "web mode",
 			tty:        true,
 			opts:       &listOptions{WebMode: true},
-			wantStderr: "Opening github.com/OWNER/REPO/labels in your browser.\n",
+			wantStderr: "Opening https://github.com/OWNER/REPO/labels in your browser.\n",
 		},
 		{
 			name: "order by name ascending",
@@ -338,11 +338,11 @@ func TestListRun(t *testing.T) {
 								}
 							}
 						}
-					}`, func(s string, m map[string]interface{}) {
+					}`, func(s string, m map[string]any) {
 						assert.Equal(t, "OWNER", m["owner"])
 						assert.Equal(t, "REPO", m["repo"])
 						assert.Equal(t, float64(30), m["limit"].(float64))
-						assert.Equal(t, map[string]interface{}{"direction": "ASC", "field": "NAME"}, m["orderBy"])
+						assert.Equal(t, map[string]any{"direction": "ASC", "field": "NAME"}, m["orderBy"])
 					}),
 				)
 			},

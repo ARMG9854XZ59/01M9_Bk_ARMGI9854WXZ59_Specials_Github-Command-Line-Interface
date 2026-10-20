@@ -2,8 +2,8 @@ package io
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/utils"
 )
@@ -30,19 +30,27 @@ func NewTestHandler() *Handler {
 }
 
 // Printf writes the formatted arguments to the stderr writer.
-func (h *Handler) Printf(f string, v ...interface{}) (int, error) {
+func (h *Handler) Printf(f string, v ...any) (int, error) {
 	if !h.IO.IsStdoutTTY() {
 		return 0, nil
 	}
 	return fmt.Fprintf(h.IO.ErrOut, f, v...)
 }
 
+func (h *Handler) OutPrintf(f string, v ...any) (int, error) {
+	return fmt.Fprintf(h.IO.Out, f, v...)
+}
+
 // Println writes the arguments to the stderr writer with a newline at the end.
-func (h *Handler) Println(v ...interface{}) (int, error) {
+func (h *Handler) Println(v ...any) (int, error) {
 	if !h.IO.IsStdoutTTY() {
 		return 0, nil
 	}
 	return fmt.Fprintln(h.IO.ErrOut, v...)
+}
+
+func (h *Handler) OutPrintln(v ...any) (int, error) {
+	return fmt.Fprintln(h.IO.Out, v...)
 }
 
 func (h *Handler) VerbosePrint(msg string) (int, error) {
@@ -53,26 +61,28 @@ func (h *Handler) VerbosePrint(msg string) (int, error) {
 	return fmt.Fprintln(h.IO.ErrOut, msg)
 }
 
-func (h *Handler) VerbosePrintf(f string, v ...interface{}) (int, error) {
+func (h *Handler) VerbosePrintf(f string, v ...any) (int, error) {
 	if !h.debugEnabled || !h.IO.IsStdoutTTY() {
 		return 0, nil
 	}
-
 	return fmt.Fprintf(h.IO.ErrOut, f, v...)
 }
 
-func (h *Handler) PrintTable(headers []string, rows [][]string) error {
-	t := tableprinter.New(h.IO, tableprinter.WithHeader(headers...))
-
+func (h *Handler) PrintBulletPoints(rows [][]string) (int, error) {
+	if !h.IO.IsStdoutTTY() {
+		return 0, nil
+	}
+	maxColLen := 0
 	for _, row := range rows {
-		for _, field := range row {
-			t.AddField(field, tableprinter.WithTruncate(nil))
+		if len(row[0]) > maxColLen {
+			maxColLen = len(row[0])
 		}
-		t.EndRow()
 	}
 
-	if err := t.Render(); err != nil {
-		return fmt.Errorf("failed to print output: %v", err)
+	var info strings.Builder
+	for _, row := range rows {
+		dots := strings.Repeat(".", maxColLen-len(row[0]))
+		info.WriteString(fmt.Sprintf("%s:%s %s\n", row[0], dots, row[1]))
 	}
-	return nil
+	return fmt.Fprintln(h.IO.ErrOut, info.String())
 }

@@ -16,11 +16,12 @@ import (
 )
 
 type UnpinOptions struct {
-	HttpClient  func() (*http.Client, error)
-	Config      func() (gh.Config, error)
-	IO          *iostreams.IOStreams
-	BaseRepo    func() (ghrepo.Interface, error)
-	SelectorArg string
+	HttpClient func() (*http.Client, error)
+	Config     func() (gh.Config, error)
+	IO         *iostreams.IOStreams
+	BaseRepo   func() (ghrepo.Interface, error)
+
+	IssueNumber int
 }
 
 func NewCmdUnpin(f *cmdutil.Factory, runF func(*UnpinOptions) error) *cobra.Command {
@@ -33,7 +34,7 @@ func NewCmdUnpin(f *cmdutil.Factory, runF func(*UnpinOptions) error) *cobra.Comm
 
 	cmd := &cobra.Command{
 		Use:   "unpin {<number> | <url>}",
-		Short: "Unpin a issue",
+		Short: "Unpin an issue",
 		Long: heredoc.Doc(`
 			Unpin an issue from a repository.
 
@@ -51,8 +52,22 @@ func NewCmdUnpin(f *cmdutil.Factory, runF func(*UnpinOptions) error) *cobra.Comm
 		`),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts.BaseRepo = f.BaseRepo
-			opts.SelectorArg = args[0]
+			issueNumber, baseRepo, err := shared.ParseIssueFromArg(args[0])
+			if err != nil {
+				return err
+			}
+
+			// If the args provided the base repo then use that directly.
+			if baseRepo, present := baseRepo.Value(); present {
+				opts.BaseRepo = func() (ghrepo.Interface, error) {
+					return baseRepo, nil
+				}
+			} else {
+				// support `-R, --repo` override
+				opts.BaseRepo = f.BaseRepo
+			}
+
+			opts.IssueNumber = issueNumber
 
 			if runF != nil {
 				return runF(opts)
@@ -73,7 +88,12 @@ func unpinRun(opts *UnpinOptions) error {
 		return err
 	}
 
-	issue, baseRepo, err := shared.IssueFromArgWithFields(httpClient, opts.BaseRepo, opts.SelectorArg, []string{"id", "number", "title", "isPinned"})
+	baseRepo, err := opts.BaseRepo()
+	if err != nil {
+		return err
+	}
+
+	issue, err := shared.FindIssueOrPR(httpClient, baseRepo, opts.IssueNumber, []string{"id", "number", "title", "isPinned"})
 	if err != nil {
 		return err
 	}
@@ -102,7 +122,7 @@ func unpinIssue(httpClient *http.Client, repo ghrepo.Interface, issue *api.Issue
 		} `graphql:"unpinIssue(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.UnpinIssueInput{
 			IssueID: issue.ID,
 		},

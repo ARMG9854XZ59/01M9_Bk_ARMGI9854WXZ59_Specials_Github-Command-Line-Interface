@@ -1,5 +1,9 @@
 name: Unit and Integration Tests
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - trunk
+  pull_request:
 
 permissions:
   contents: read
@@ -14,10 +18,10 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
 
@@ -41,17 +45,17 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
 
       - name: Build executable
         run: make
 
-      - name: Run attestation command integration Tests
+      - name: Run attestation command set integration tests
+        shell: bash
         run: |
-          ./test/integration/attestation-cmd/download-and-verify-package-attestation.sh
-          ./test/integration/attestation-cmd/verify-sigstore-bundle-versions.sh
+          ./test/integration/attestation-cmd/run-all-tests.sh "${{ matrix.os }}"

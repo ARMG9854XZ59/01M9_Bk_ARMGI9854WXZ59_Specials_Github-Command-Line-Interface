@@ -3,10 +3,10 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -33,6 +33,7 @@ type PullRequest struct {
 	Closed              bool
 	URL                 string
 	BaseRefName         string
+	BaseRefOid          string
 	HeadRefName         string
 	HeadRefOid          string
 	Body                string
@@ -61,6 +62,7 @@ type PullRequest struct {
 	MergedBy            *Author
 	HeadRepositoryOwner Owner
 	HeadRepository      *PRRepository
+	Repository          *PRRepository
 	IsCrossRepository   bool
 	IsDraft             bool
 	MaintainerCanModify bool
@@ -83,6 +85,7 @@ type PullRequest struct {
 	}
 
 	Assignees      Assignees
+	AssignedActors AssignedActors
 	Labels         Labels
 	ProjectCards   ProjectCards
 	ProjectItems   ProjectItems
@@ -92,6 +95,8 @@ type PullRequest struct {
 	Reviews        PullRequestReviews
 	LatestReviews  PullRequestReviews
 	ReviewRequests ReviewRequests
+
+	ClosingIssuesReferences ClosingIssuesReferences
 }
 
 type StatusCheckRollupNode struct {
@@ -104,6 +109,26 @@ type StatusCheckRollupCommit struct {
 
 type CommitStatusCheckRollup struct {
 	Contexts CheckContexts
+}
+
+type ClosingIssuesReferences struct {
+	Nodes []struct {
+		ID         string
+		Number     int
+		URL        string
+		Repository struct {
+			ID    string
+			Name  string
+			Owner struct {
+				ID    string
+				Login string
+			}
+		}
+	}
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
 }
 
 // https://docs.github.com/en/graphql/reference/enums#checkrunstate
@@ -227,8 +252,16 @@ type Workflow struct {
 }
 
 type PRRepository struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	NameWithOwner string `json:"nameWithOwner"`
+
+	// Fields below are omitted when empty because this type is used by
+	// headRepository.
+
+	DatabaseID int64 `json:"databaseId,omitempty"`
+	// One of ADMIN, MAINTAIN, WRITE, TRIAGE, READ.
+	ViewerPermission string `json:"viewerPermission,omitempty"`
 }
 
 type AutoMergeRequest struct {
@@ -267,42 +300,10 @@ type PullRequestCommitCommit struct {
 }
 
 type PullRequestFile struct {
-	Path      string `json:"path"`
-	Additions int    `json:"additions"`
-	Deletions int    `json:"deletions"`
-}
-
-type ReviewRequests struct {
-	Nodes []struct {
-		RequestedReviewer RequestedReviewer
-	}
-}
-
-type RequestedReviewer struct {
-	TypeName     string `json:"__typename"`
-	Login        string `json:"login"`
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Organization struct {
-		Login string `json:"login"`
-	} `json:"organization"`
-}
-
-func (r RequestedReviewer) LoginOrSlug() string {
-	if r.TypeName == teamTypeName {
-		return fmt.Sprintf("%s/%s", r.Organization.Login, r.Slug)
-	}
-	return r.Login
-}
-
-const teamTypeName = "Team"
-
-func (r ReviewRequests) Logins() []string {
-	logins := make([]string, len(r.Nodes))
-	for i, r := range r.Nodes {
-		logins[i] = r.RequestedReviewer.LoginOrSlug()
-	}
-	return logins
+	Path       string `json:"path"`
+	Additions  int    `json:"additions"`
+	Deletions  int    `json:"deletions"`
+	ChangeType string `json:"changeType"`
 }
 
 func (pr PullRequest) HeadLabel() string {
@@ -324,27 +325,26 @@ func (pr PullRequest) CurrentUserComments() []Comment {
 	return pr.Comments.CurrentUserComments()
 }
 
+// RepositoryDatabaseID returns the numeric REST id of the repository, or zero
+// when the "repository" field was not requested.
+func (pr PullRequest) RepositoryDatabaseID() int64 {
+	if pr.Repository == nil {
+		return 0
+	}
+	return pr.Repository.DatabaseID
+}
+
+// RepositoryViewerPermission returns the requesting user's role on the
+// repository, or an empty string when the "repository" field was not requested.
+func (pr PullRequest) RepositoryViewerPermission() string {
+	if pr.Repository == nil {
+		return ""
+	}
+	return pr.Repository.ViewerPermission
+}
+
 func (pr PullRequest) IsOpen() bool {
 	return pr.State == "OPEN"
-}
-
-type PullRequestReviewStatus struct {
-	ChangesRequested bool
-	Approved         bool
-	ReviewRequired   bool
-}
-
-func (pr *PullRequest) ReviewStatus() PullRequestReviewStatus {
-	var status PullRequestReviewStatus
-	switch pr.ReviewDecision {
-	case "CHANGES_REQUESTED":
-		status.ChangesRequested = true
-	case "APPROVED":
-		status.Approved = true
-	case "REVIEW_REQUIRED":
-		status.ReviewRequired = true
-	}
-	return status
 }
 
 type PullRequestChecksStatus struct {
@@ -486,20 +486,8 @@ func parseCheckStatusFromCheckConclusionState(state CheckConclusionState) checkS
 	}
 }
 
-func (pr *PullRequest) DisplayableReviews() PullRequestReviews {
-	published := []PullRequestReview{}
-	for _, prr := range pr.Reviews.Nodes {
-		//Dont display pending reviews
-		//Dont display commenting reviews without top level comment body
-		if prr.State != "PENDING" && !(prr.State == "COMMENTED" && prr.Body == "") {
-			published = append(published, prr)
-		}
-	}
-	return PullRequestReviews{Nodes: published, TotalCount: len(published)}
-}
-
 // CreatePullRequest creates a pull request in a GitHub repository
-func CreatePullRequest(client *Client, repo *Repository, params map[string]interface{}) (*PullRequest, error) {
+func CreatePullRequest(client *Client, repo *Repository, params map[string]any) (*PullRequest, error) {
 	query := `
 		mutation PullRequestCreate($input: CreatePullRequestInput!) {
 			createPullRequest(input: $input) {
@@ -510,7 +498,7 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 			}
 	}`
 
-	inputParams := map[string]interface{}{
+	inputParams := map[string]any{
 		"repositoryId": repo.ID,
 	}
 	for key, val := range params {
@@ -519,7 +507,7 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 			inputParams[key] = val
 		}
 	}
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": inputParams,
 	}
 
@@ -537,7 +525,7 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 
 	// metadata parameters aren't currently available in `createPullRequest`,
 	// but they are in `updatePullRequest`
-	updateParams := make(map[string]interface{})
+	updateParams := make(map[string]any)
 	for key, val := range params {
 		switch key {
 		case "assigneeIds", "labelIds", "projectIds", "milestoneId":
@@ -552,7 +540,7 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 			updatePullRequest(input: $input) { clientMutationId }
 		}`
 		updateParams["pullRequestId"] = pr.ID
-		variables := map[string]interface{}{
+		variables := map[string]any{
 			"input": updateParams,
 		}
 		err := client.GraphQL(repo.RepoHost(), updateQuery, variables, &result)
@@ -561,29 +549,52 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 		}
 	}
 
-	// reviewers are requested in yet another additional mutation
-	reviewParams := make(map[string]interface{})
-	if ids, ok := params["userReviewerIds"]; ok && !isBlank(ids) {
-		reviewParams["userIds"] = ids
-	}
-	if ids, ok := params["teamReviewerIds"]; ok && !isBlank(ids) {
-		reviewParams["teamIds"] = ids
+	// Assign users using login-based mutation when ApiActorsSupported is true (github.com).
+	if assigneeLogins, ok := params["assigneeLogins"].([]string); ok && len(assigneeLogins) > 0 {
+		err := ReplaceActorsForAssignableByLogin(client, repo, pr.ID, assigneeLogins)
+		if err != nil {
+			return pr, err
+		}
 	}
 
-	//TODO: How much work to extract this into own method and use for create and edit?
-	if len(reviewParams) > 0 {
-		reviewQuery := `
+	// TODO ApiActorsSupported
+	// Request reviewers using either login-based (github.com) or ID-based (GHES) mutation.
+	// The ID-based path can be removed once GHES supports requestReviewsByLogin.
+	userLogins, hasUserLogins := params["userReviewerLogins"].([]string)
+	botLogins, hasBotLogins := params["botReviewerLogins"].([]string)
+	teamSlugs, hasTeamSlugs := params["teamReviewerSlugs"].([]string)
+
+	if hasUserLogins || hasBotLogins || hasTeamSlugs {
+		// Use login-based mutation (RequestReviewsByLogin) for github.com
+		err := RequestReviewsByLogin(client, repo, pr.ID, userLogins, botLogins, teamSlugs, true)
+		if err != nil {
+			return pr, err
+		}
+	} else {
+		// Use ID-based mutation (requestReviews) for GHES compatibility
+		reviewParams := make(map[string]any)
+		if ids, ok := params["userReviewerIds"]; ok && !isBlank(ids) {
+			reviewParams["userIds"] = ids
+		}
+		if ids, ok := params["teamReviewerIds"]; ok && !isBlank(ids) {
+			reviewParams["teamIds"] = ids
+		}
+
+		//TODO: How much work to extract this into own method and use for create and edit?
+		if len(reviewParams) > 0 {
+			reviewQuery := `
 		mutation PullRequestCreateRequestReviews($input: RequestReviewsInput!) {
 			requestReviews(input: $input) { clientMutationId }
 		}`
-		reviewParams["pullRequestId"] = pr.ID
-		reviewParams["union"] = true
-		variables := map[string]interface{}{
-			"input": reviewParams,
-		}
-		err := client.GraphQL(repo.RepoHost(), reviewQuery, variables, &result)
-		if err != nil {
-			return pr, err
+			reviewParams["pullRequestId"] = pr.ID
+			reviewParams["union"] = true
+			variables := map[string]any{
+				"input": reviewParams,
+			}
+			err := client.GraphQL(repo.RepoHost(), reviewQuery, variables, &result)
+			if err != nil {
+				return pr, err
+			}
 		}
 	}
 
@@ -603,17 +614,131 @@ func CreatePullRequest(client *Client, repo *Repository, params map[string]inter
 	return pr, nil
 }
 
-func UpdatePullRequestReviews(client *Client, repo ghrepo.Interface, params githubv4.RequestReviewsInput) error {
-	var mutation struct {
-		RequestReviews struct {
-			PullRequest struct {
-				ID string
-			}
-		} `graphql:"requestReviews(input: $input)"`
+// ReplaceActorsForAssignableByLogin calls the replaceActorsForAssignable mutation
+// using actor logins. This avoids the need to resolve logins to node IDs.
+func ReplaceActorsForAssignableByLogin(client *Client, repo ghrepo.Interface, assignableID string, logins []string) error {
+	type ReplaceActorsForAssignableInput struct {
+		AssignableID githubv4.ID       `json:"assignableId"`
+		ActorLogins  []githubv4.String `json:"actorLogins"`
 	}
-	variables := map[string]interface{}{"input": params}
-	err := client.Mutate(repo.RepoHost(), "PullRequestUpdateRequestReviews", &mutation, variables)
-	return err
+
+	actorLogins := make([]githubv4.String, len(logins))
+	for i, l := range logins {
+		// The replaceActorsForAssignable mutation requires the [bot] suffix
+		// for bot actor logins (e.g. "copilot-swe-agent[bot]"), unlike
+		// requestReviewsByLogin which has a separate botLogins field.
+		if l == CopilotAssigneeLogin {
+			l = l + "[bot]"
+		}
+		actorLogins[i] = githubv4.String(l)
+	}
+
+	var mutation struct {
+		ReplaceActorsForAssignable struct {
+			TypeName string `graphql:"__typename"`
+		} `graphql:"replaceActorsForAssignable(input: $input)"`
+	}
+
+	variables := map[string]any{
+		"input": ReplaceActorsForAssignableInput{
+			AssignableID: githubv4.ID(assignableID),
+			ActorLogins:  actorLogins,
+		},
+	}
+
+	return client.Mutate(repo.RepoHost(), "ReplaceActorsForAssignable", &mutation, variables)
+}
+
+// SuggestedAssignableActors fetches up to 10 suggested actors for a specific assignable
+// (Issue or PullRequest) node ID. `assignableID` is the GraphQL node ID for the Issue/PR.
+// Returns the actors, the total count of available assignees in the repo, and an error.
+func SuggestedAssignableActors(client *Client, repo ghrepo.Interface, assignableID string, query string) ([]AssignableActor, int, error) {
+	type responseData struct {
+		Repository struct {
+			AssignableUsers struct {
+				TotalCount int
+			}
+		} `graphql:"repository(owner: $owner, name: $name)"`
+		Node struct {
+			Issue struct {
+				SuggestedActors struct {
+					Nodes []struct {
+						TypeName string `graphql:"__typename"`
+						User     struct {
+							ID    string
+							Login string
+							Name  string
+						} `graphql:"... on User"`
+						Bot struct {
+							ID    string
+							Login string
+						} `graphql:"... on Bot"`
+					}
+				} `graphql:"suggestedActors(first: 10, query: $query)"`
+			} `graphql:"... on Issue"`
+			PullRequest struct {
+				SuggestedActors struct {
+					Nodes []struct {
+						TypeName string `graphql:"__typename"`
+						User     struct {
+							ID    string
+							Login string
+							Name  string
+						} `graphql:"... on User"`
+						Bot struct {
+							ID    string
+							Login string
+						} `graphql:"... on Bot"`
+					}
+				} `graphql:"suggestedActors(first: 10, query: $query)"`
+			} `graphql:"... on PullRequest"`
+		} `graphql:"node(id: $id)"`
+	}
+
+	variables := map[string]any{
+		"id":    githubv4.ID(assignableID),
+		"query": githubv4.String(query),
+		"owner": githubv4.String(repo.RepoOwner()),
+		"name":  githubv4.String(repo.RepoName()),
+	}
+
+	var result responseData
+	if err := client.Query(repo.RepoHost(), "SuggestedAssignableActors", &result, variables); err != nil {
+		return nil, 0, err
+	}
+
+	availableAssigneesCount := result.Repository.AssignableUsers.TotalCount
+
+	var nodes []struct {
+		TypeName string `graphql:"__typename"`
+		User     struct {
+			ID    string
+			Login string
+			Name  string
+		} `graphql:"... on User"`
+		Bot struct {
+			ID    string
+			Login string
+		} `graphql:"... on Bot"`
+	}
+
+	if result.Node.PullRequest.SuggestedActors.Nodes != nil {
+		nodes = result.Node.PullRequest.SuggestedActors.Nodes
+	} else if result.Node.Issue.SuggestedActors.Nodes != nil {
+		nodes = result.Node.Issue.SuggestedActors.Nodes
+	}
+
+	actors := make([]AssignableActor, 0, len(nodes))
+
+	for _, n := range nodes {
+		if n.TypeName == "User" && n.User.Login != "" {
+			actors = append(actors, AssignableUser{id: n.User.ID, login: n.User.Login, name: n.User.Name})
+		} else if n.TypeName == "Bot" && n.Bot.Login != "" {
+			actors = append(actors, AssignableBot{id: n.Bot.ID, login: n.Bot.Login})
+		}
+	}
+
+	return actors, availableAssigneesCount, nil
 }
 
 func UpdatePullRequestBranch(client *Client, repo ghrepo.Interface, params githubv4.UpdatePullRequestBranchInput) error {
@@ -624,11 +749,11 @@ func UpdatePullRequestBranch(client *Client, repo ghrepo.Interface, params githu
 			}
 		} `graphql:"updatePullRequestBranch(input: $input)"`
 	}
-	variables := map[string]interface{}{"input": params}
+	variables := map[string]any{"input": params}
 	return client.Mutate(repo.RepoHost(), "PullRequestUpdateBranch", &mutation, variables)
 }
 
-func isBlank(v interface{}) bool {
+func isBlank(v any) bool {
 	switch vv := v.(type) {
 	case string:
 		return vv == ""
@@ -648,7 +773,7 @@ func PullRequestClose(httpClient *http.Client, repo ghrepo.Interface, prID strin
 		} `graphql:"closePullRequest(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.ClosePullRequestInput{
 			PullRequestID: prID,
 		},
@@ -667,7 +792,7 @@ func PullRequestReopen(httpClient *http.Client, repo ghrepo.Interface, prID stri
 		} `graphql:"reopenPullRequest(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.ReopenPullRequestInput{
 			PullRequestID: prID,
 		},
@@ -686,13 +811,44 @@ func PullRequestReady(client *Client, repo ghrepo.Interface, pr *PullRequest) er
 		} `graphql:"markPullRequestReadyForReview(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.MarkPullRequestReadyForReviewInput{
 			PullRequestID: pr.ID,
 		},
 	}
 
 	return client.Mutate(repo.RepoHost(), "PullRequestReadyForReview", &mutation, variables)
+}
+
+func PullRequestRevert(client *Client, repo ghrepo.Interface, params githubv4.RevertPullRequestInput) (*PullRequest, error) {
+	var mutation struct {
+		RevertPullRequest struct {
+			PullRequest struct {
+				ID githubv4.ID
+			}
+			RevertPullRequest struct {
+				ID     string
+				Number int
+				URL    string
+			}
+		} `graphql:"revertPullRequest(input: $input)"`
+	}
+
+	variables := map[string]any{
+		"input": params,
+	}
+	err := client.Mutate(repo.RepoHost(), "PullRequestRevert", &mutation, variables)
+	if err != nil {
+		return nil, err
+	}
+	pr := &mutation.RevertPullRequest.RevertPullRequest
+	revertPR := &PullRequest{
+		ID:     pr.ID,
+		Number: pr.Number,
+		URL:    pr.URL,
+	}
+
+	return revertPR, nil
 }
 
 func ConvertPullRequestToDraft(client *Client, repo ghrepo.Interface, pr *PullRequest) error {
@@ -704,7 +860,7 @@ func ConvertPullRequestToDraft(client *Client, repo ghrepo.Interface, pr *PullRe
 		} `graphql:"convertPullRequestToDraft(input: $input)"`
 	}
 
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"input": githubv4.ConvertPullRequestToDraftInput{
 			PullRequestID: pr.ID,
 		},
@@ -714,8 +870,11 @@ func ConvertPullRequestToDraft(client *Client, repo ghrepo.Interface, pr *PullRe
 }
 
 func BranchDeleteRemote(client *Client, repo ghrepo.Interface, branch string) error {
-	path := fmt.Sprintf("repos/%s/%s/git/refs/heads/%s", repo.RepoOwner(), repo.RepoName(), url.PathEscape(branch))
-	return client.REST(repo.RepoHost(), "DELETE", path, nil, nil)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "git", "refs", fmt.Sprintf("heads/%s", branch))
+	if err != nil {
+		return err
+	}
+	return client.REST(repo.RepoHost(), "DELETE", path.String(), nil, nil)
 }
 
 type RefComparison struct {
@@ -746,7 +905,7 @@ func ComparePullRequestBaseBranchWith(client *Client, repo ghrepo.Interface, prN
 			}
 		}
 	}
-	variables := map[string]interface{}{
+	variables := map[string]any{
 		"owner":             repo.RepoOwner(),
 		"repo":              repo.RepoName(),
 		"pullRequestNumber": prNumber,

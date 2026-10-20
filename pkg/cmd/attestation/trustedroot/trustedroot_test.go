@@ -3,6 +3,7 @@ package trustedroot
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -10,8 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
+	ghmock "github.com/cli/cli/v2/internal/gh/mock"
+	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test"
 	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
 )
 
@@ -19,6 +25,18 @@ func TestNewTrustedRootCmd(t *testing.T) {
 	testIO, _, _, _ := iostreams.Test()
 	f := &cmdutil.Factory{
 		IOStreams: testIO,
+		Config: func() (gh.Config, error) {
+			return &ghmock.ConfigMock{}, nil
+		},
+		HttpClient: func() (*http.Client, error) {
+			reg := &httpmock.Registry{}
+			client := &http.Client{}
+			httpmock.ReplaceTripper(client, reg)
+			return client, nil
+		},
+		ExternalHttpClient: func() (*http.Client, error) {
+			return nil, nil
+		},
 	}
 
 	testcases := []struct {
@@ -72,6 +90,90 @@ func TestNewTrustedRootCmd(t *testing.T) {
 	}
 }
 
+func TestNewTrustedRootWithTenancy(t *testing.T) {
+	testIO, _, _, _ := iostreams.Test()
+	var testReg httpmock.Registry
+	var metaResp = api.MetaResponse{
+		Domains: api.Domain{
+			ArtifactAttestations: api.ArtifactAttestations{
+				TrustDomain: "foo",
+			},
+		},
+	}
+	testReg.Register(httpmock.REST(http.MethodGet, "meta"),
+		httpmock.StatusJSONResponse(200, &metaResp))
+
+	httpClientFunc := func() (*http.Client, error) {
+		reg := &testReg
+		client := &http.Client{}
+		httpmock.ReplaceTripper(client, reg)
+		return client, nil
+	}
+
+	cli := "--hostname foo-bar.ghe.com"
+
+	t.Run("Host with NO auth configured", func(t *testing.T) {
+		f := &cmdutil.Factory{
+			IOStreams: testIO,
+			Config: func() (gh.Config, error) {
+				return &ghmock.ConfigMock{
+					AuthenticationFunc: func() gh.AuthConfig {
+						return &stubAuthConfig{hasActiveToken: false}
+					},
+				}, nil
+			},
+			HttpClient: httpClientFunc,
+			ExternalHttpClient: func() (*http.Client, error) {
+				return nil, nil
+			},
+		}
+
+		cmd := NewTrustedRootCmd(f, func(_ *Options) error {
+			return nil
+		})
+
+		argv := strings.Split(cli, " ")
+		cmd.SetArgs(argv)
+		cmd.SetIn(&bytes.Buffer{})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		_, err := cmd.ExecuteC()
+
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "not authenticated")
+	})
+
+	t.Run("Host with auth configured", func(t *testing.T) {
+		f := &cmdutil.Factory{
+			IOStreams: testIO,
+			Config: func() (gh.Config, error) {
+				return &ghmock.ConfigMock{
+					AuthenticationFunc: func() gh.AuthConfig {
+						return &stubAuthConfig{hasActiveToken: true}
+					},
+				}, nil
+			},
+			HttpClient: httpClientFunc,
+			ExternalHttpClient: func() (*http.Client, error) {
+				return nil, nil
+			},
+		}
+
+		cmd := NewTrustedRootCmd(f, func(_ *Options) error {
+			return nil
+		})
+
+		argv := strings.Split(cli, " ")
+		cmd.SetArgs(argv)
+		cmd.SetIn(&bytes.Buffer{})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+
+		_, err := cmd.ExecuteC()
+		assert.NoError(t, err)
+	})
+}
+
 var newTUFErrClient tufClientInstantiator = func(o *tuf.Options) (*tuf.Client, error) {
 	return nil, fmt.Errorf("failed to create TUF client")
 }
@@ -85,17 +187,32 @@ func TestGetTrustedRoot(t *testing.T) {
 		TufRootPath: root,
 	}
 
+	reg := &httpmock.Registry{}
+	client := &http.Client{}
+	httpmock.ReplaceTripper(client, reg)
+
 	t.Run("failed to create TUF root", func(t *testing.T) {
-		err := getTrustedRoot(newTUFErrClient, opts)
+		err := getTrustedRoot(newTUFErrClient, opts, client)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "failed to create TUF client")
 	})
 
 	t.Run("fails because the root cannot be found", func(t *testing.T) {
 		opts.TufRootPath = test.NormalizeRelativePath("./does/not/exist/root.json")
-		err := getTrustedRoot(tuf.New, opts)
+		err := getTrustedRoot(tuf.New, opts, client)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "failed to read root file")
 	})
 
+}
+
+type stubAuthConfig struct {
+	config.AuthConfig
+	hasActiveToken bool
+}
+
+var _ gh.AuthConfig = (*stubAuthConfig)(nil)
+
+func (c *stubAuthConfig) HasActiveToken(host string) bool {
+	return c.hasActiveToken
 }

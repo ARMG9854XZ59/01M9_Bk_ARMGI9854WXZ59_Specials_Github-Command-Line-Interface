@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -322,7 +323,7 @@ func TestDelete(t *testing.T) {
 				gotDeleted = append(gotDeleted, delArgs.Name)
 			}
 			sort.Strings(gotDeleted)
-			if !sliceEquals(gotDeleted, tt.wantDeleted) {
+			if !slices.Equal(gotDeleted, tt.wantDeleted) {
 				t.Errorf("deleted %q, want %q", gotDeleted, tt.wantDeleted)
 			}
 			if out := stdout.String(); out != tt.wantStdout {
@@ -335,22 +336,10 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-func sliceEquals(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func sortLines(s string) string {
 	trailing := ""
-	if strings.HasSuffix(s, "\n") {
-		s = strings.TrimSuffix(s, "\n")
+	if before, ok := strings.CutSuffix(s, "\n"); ok {
+		s = before
 		trailing = "\n"
 	}
 	lines := strings.Split(s, "\n")

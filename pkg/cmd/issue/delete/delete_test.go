@@ -12,6 +12,7 @@ import (
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/prompter"
+	"github.com/cli/cli/v2/pkg/cmd/issue/argparsetest"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
@@ -19,6 +20,10 @@ import (
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestNewCmdDelete(t *testing.T) {
+	argparsetest.TestArgParsing(t, NewCmdDelete)
+}
 
 func runCommand(rt http.RoundTripper, pm *prompter.MockPrompter, isTTY bool, cli string) (*test.CmdOut, error) {
 	ios, _, stdout, stderr := iostreams.Test()
@@ -33,7 +38,7 @@ func runCommand(rt http.RoundTripper, pm *prompter.MockPrompter, isTTY bool, cli
 			return &http.Client{Transport: rt}, nil
 		},
 		Config: func() (gh.Config, error) {
-			return config.NewBlankConfig(), nil
+			return config.NewMockConfig(), nil
 		},
 		BaseRepo: func() (ghrepo.Interface, error) {
 			return ghrepo.New("OWNER", "REPO"), nil
@@ -74,7 +79,7 @@ func TestIssueDelete(t *testing.T) {
 	httpRegistry.Register(
 		httpmock.GraphQL(`mutation IssueDelete\b`),
 		httpmock.GraphQLMutation(`{"id": "THE-ID"}`,
-			func(inputs map[string]interface{}) {
+			func(inputs map[string]any) {
 				assert.Equal(t, inputs["issueId"], "THE-ID")
 			}),
 	)
@@ -109,7 +114,7 @@ func TestIssueDelete_confirm(t *testing.T) {
 	httpRegistry.Register(
 		httpmock.GraphQL(`mutation IssueDelete\b`),
 		httpmock.GraphQLMutation(`{"id": "THE-ID"}`,
-			func(inputs map[string]interface{}) {
+			func(inputs map[string]any) {
 				assert.Equal(t, inputs["issueId"], "THE-ID")
 			}),
 	)

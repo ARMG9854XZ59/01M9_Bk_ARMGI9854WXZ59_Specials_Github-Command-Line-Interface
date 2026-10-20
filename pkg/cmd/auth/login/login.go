@@ -15,17 +15,18 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/auth/shared/gitcredentials"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	ghAuth "github.com/cli/go-gh/v2/pkg/auth"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/spf13/cobra"
 )
 
 type LoginOptions struct {
-	IO         *iostreams.IOStreams
-	Config     func() (gh.Config, error)
-	HttpClient func() (*http.Client, error)
-	GitClient  *git.Client
-	Prompter   shared.Prompt
-	Browser    browser.Browser
+	IO              *iostreams.IOStreams
+	Config          func() (gh.Config, error)
+	HttpClient      func() (*http.Client, error)
+	PlainHttpClient func() (*http.Client, error)
+	GitClient       *git.Client
+	Prompter        shared.Prompt
+	Browser         browser.Browser
 
 	MainExecutable string
 
@@ -38,16 +39,18 @@ type LoginOptions struct {
 	GitProtocol      string
 	InsecureStorage  bool
 	SkipSSHKeyPrompt bool
+	Clipboard        *bool
 }
 
 func NewCmdLogin(f *cmdutil.Factory, runF func(*LoginOptions) error) *cobra.Command {
 	opts := &LoginOptions{
-		IO:         f.IOStreams,
-		Config:     f.Config,
-		HttpClient: f.HttpClient,
-		GitClient:  f.GitClient,
-		Prompter:   f.Prompter,
-		Browser:    f.Browser,
+		IO:              f.IOStreams,
+		Config:          f.Config,
+		HttpClient:      f.HttpClient,
+		PlainHttpClient: f.PlainHttpClient,
+		GitClient:       f.GitClient,
+		Prompter:        f.Prompter,
+		Browser:         f.Browser,
 	}
 
 	var tokenStdin bool
@@ -59,14 +62,20 @@ func NewCmdLogin(f *cmdutil.Factory, runF func(*LoginOptions) error) *cobra.Comm
 		Long: heredoc.Docf(`
 			Authenticate with a GitHub host.
 
+			The default hostname is %[1]sgithub.com%[1]s. This can be overridden using the %[1]s--hostname%[1]s
+			flag.
+
 			The default authentication mode is a web-based browser flow. After completion, an
 			authentication token will be stored securely in the system credential store.
 			If a credential store is not found or there is an issue using it gh will fallback
 			to writing the token to a plain text file. See %[1]sgh auth status%[1]s for its
 			stored location.
 
-			Alternatively, use %[1]s--with-token%[1]s to pass in a token on standard input.
+			Alternatively, use %[1]s--with-token%[1]s to pass in a personal access token (classic) on standard input.
 			The minimum required scopes for the token are: %[1]srepo%[1]s, %[1]sread:org%[1]s, and %[1]sgist%[1]s.
+			Take care when passing a fine-grained personal access token to %[1]s--with-token%[1]s
+			as the inherent scoping to certain resources may cause confusing behaviour when interacting with other
+			resources. Favour setting %[1]sGH_TOKEN%[1]s for fine-grained personal access token usage.
 
 			Alternatively, gh will use the authentication token found in environment variables.
 			This method is most suitable for "headless" use of gh such as in automation. See
@@ -81,10 +90,16 @@ func NewCmdLogin(f *cmdutil.Factory, runF func(*LoginOptions) error) *cobra.Comm
 			Specifying %[1]sssh%[1]s for the git protocol will detect existing SSH keys to upload,
 			prompting to create and upload a new key if one is not found. This can be skipped with
 			%[1]s--skip-ssh-key%[1]s flag.
+
+			For more information on OAuth scopes, see
+			<https://docs.github.com/en/developers/apps/building-oauth-apps/scopes-for-oauth-apps/>.
 		`, "`"),
 		Example: heredoc.Doc(`
 			# Start interactive setup
 			$ gh auth login
+
+			# Open a browser to authenticate and copy one-time OAuth code to clipboard
+			$ gh auth login --web --clipboard
 
 			# Authenticate against github.com by reading the token from a file
 			$ gh auth login --with-token < mytoken.txt
@@ -120,10 +135,10 @@ func NewCmdLogin(f *cmdutil.Factory, runF func(*LoginOptions) error) *cobra.Comm
 			}
 
 			if opts.Hostname == "" && (!opts.Interactive || opts.Web) {
-				opts.Hostname, _ = ghAuth.DefaultHost()
+				opts.Hostname, _ = ghauth.DefaultHost()
 			}
 
-			opts.MainExecutable = f.Executable()
+			opts.MainExecutable = f.ExecutablePath
 			if runF != nil {
 				return runF(opts)
 			}
@@ -136,6 +151,7 @@ func NewCmdLogin(f *cmdutil.Factory, runF func(*LoginOptions) error) *cobra.Comm
 	cmd.Flags().StringSliceVarP(&opts.Scopes, "scopes", "s", nil, "Additional authentication scopes to request")
 	cmd.Flags().BoolVar(&tokenStdin, "with-token", false, "Read token from standard input")
 	cmd.Flags().BoolVarP(&opts.Web, "web", "w", false, "Open a browser to authenticate")
+	cmdutil.NilBoolFlag(cmd, &opts.Clipboard, "clipboard", "c", "Copy one-time OAuth device code to clipboard")
 	cmdutil.StringEnumFlag(cmd, &opts.GitProtocol, "git-protocol", "p", "", []string{"ssh", "https"}, "The protocol to use for git operations on this host")
 
 	// secure storage became the default on 2023/4/04; this flag is left as a no-op for backwards compatibility
@@ -155,6 +171,7 @@ func loginRun(opts *LoginOptions) error {
 		return err
 	}
 	authCfg := cfg.Authentication()
+	copyToClipboard := shared.ShouldCopyToClipboard(cfg, opts.Clipboard)
 
 	hostname := opts.Hostname
 	if opts.Interactive && hostname == "" {
@@ -174,6 +191,11 @@ func loginRun(opts *LoginOptions) error {
 		fmt.Fprintf(opts.IO.ErrOut, "The value of the %s environment variable is being used for authentication.\n", src)
 		fmt.Fprint(opts.IO.ErrOut, "To have GitHub CLI store credentials instead, first clear the value from the environment.\n")
 		return cmdutil.SilentError
+	}
+
+	plainHTTPClient, err := opts.PlainHttpClient()
+	if err != nil {
+		return err
 	}
 
 	httpClient, err := opts.HttpClient()
@@ -196,16 +218,17 @@ func loginRun(opts *LoginOptions) error {
 	}
 
 	return shared.Login(&shared.LoginOptions{
-		IO:          opts.IO,
-		Config:      authCfg,
-		HTTPClient:  httpClient,
-		Hostname:    hostname,
-		Interactive: opts.Interactive,
-		Web:         opts.Web,
-		Scopes:      opts.Scopes,
-		GitProtocol: opts.GitProtocol,
-		Prompter:    opts.Prompter,
-		Browser:     opts.Browser,
+		IO:              opts.IO,
+		Config:          authCfg,
+		HTTPClient:      httpClient,
+		PlainHTTPClient: plainHTTPClient,
+		Hostname:        hostname,
+		Interactive:     opts.Interactive,
+		Web:             opts.Web,
+		Scopes:          opts.Scopes,
+		GitProtocol:     opts.GitProtocol,
+		Prompter:        opts.Prompter,
+		Browser:         opts.Browser,
 		CredentialFlow: &shared.GitCredentialFlow{
 			Prompter: opts.Prompter,
 			HelperConfig: &gitcredentials.HelperConfig{
@@ -218,25 +241,24 @@ func loginRun(opts *LoginOptions) error {
 		},
 		SecureStorage:    !opts.InsecureStorage,
 		SkipSSHKeyPrompt: opts.SkipSSHKeyPrompt,
+		CopyToClipboard:  copyToClipboard,
 	})
 }
 
 func promptForHostname(opts *LoginOptions) (string, error) {
-	options := []string{"GitHub.com", "GitHub Enterprise Server"}
+	options := []string{"GitHub.com", "Other"}
 	hostType, err := opts.Prompter.Select(
-		"What account do you want to log into?",
+		"Where do you use GitHub?",
 		options[0],
 		options)
 	if err != nil {
 		return "", err
 	}
 
-	isEnterprise := hostType == 1
-
-	hostname := ghinstance.Default()
-	if isEnterprise {
-		hostname, err = opts.Prompter.InputHostname()
+	isGitHubDotCom := hostType == 0
+	if isGitHubDotCom {
+		return ghinstance.Default(), nil
 	}
 
-	return hostname, err
+	return opts.Prompter.InputHostname()
 }

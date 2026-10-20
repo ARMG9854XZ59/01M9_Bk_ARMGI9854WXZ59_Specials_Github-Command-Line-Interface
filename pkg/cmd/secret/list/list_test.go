@@ -3,15 +3,20 @@ package list
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	ghContext "github.com/cli/cli/v2/context"
+	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/pkg/cmd/secret/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -70,6 +75,21 @@ func Test_NewCmdList(t *testing.T) {
 				OrgName:     "UmbrellaCorporation",
 			},
 		},
+		{
+			name: "Agents repo",
+			cli:  "--app Agents",
+			wants: ListOptions{
+				Application: "Agents",
+			},
+		},
+		{
+			name: "Agents org",
+			cli:  "--app Agents --org UmbrellaCorporation",
+			wants: ListOptions{
+				Application: "Agents",
+				OrgName:     "UmbrellaCorporation",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -97,6 +117,140 @@ func Test_NewCmdList(t *testing.T) {
 
 			assert.Equal(t, tt.wants.OrgName, gotOpts.OrgName)
 			assert.Equal(t, tt.wants.EnvName, gotOpts.EnvName)
+		})
+	}
+}
+
+func TestNewCmdListBaseRepoFuncs(t *testing.T) {
+	multipleRemotes := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "fork"),
+		},
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "upstream",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	singleRemote := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	tests := []struct {
+		name          string
+		args          string
+		env           map[string]string
+		remotes       ghContext.Remotes
+		prompterStubs func(*prompter.MockPrompter)
+		wantRepo      ghrepo.Interface
+		wantErr       error
+	}{
+		{
+			name:     "when there is a repo flag provided, the factory base repo func is used",
+			args:     "--repo owner/repo",
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name: "when GH_REPO env var is provided, the factory base repo func is used",
+			env: map[string]string{
+				"GH_REPO": "owner/repo",
+			},
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and no prompting, the base func requiring no ambiguity is used",
+			args:    "",
+			remotes: multipleRemotes,
+			wantErr: shared.AmbiguousBaseRepoError{
+				Remotes: multipleRemotes,
+			},
+		},
+		{
+			name:     "when there is no repo flag or GH_REPO env provided, and there is a single remote, the factory base repo func is used",
+			args:     "",
+			remotes:  singleRemote,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and can prompt, the base func resolving ambiguity is used",
+			args:    "",
+			remotes: multipleRemotes,
+			prompterStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterSelect(
+					"Select a repo",
+					[]string{"owner/fork", "owner/repo"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "owner/fork")
+					},
+				)
+			},
+			wantRepo: ghrepo.New("owner", "fork"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ios, _, _, _ := iostreams.Test()
+			var pm *prompter.MockPrompter
+			if tt.prompterStubs != nil {
+				ios.SetStdinTTY(true)
+				ios.SetStdoutTTY(true)
+				ios.SetStderrTTY(true)
+				pm = prompter.NewMockPrompter(t)
+				tt.prompterStubs(pm)
+			}
+
+			f := &cmdutil.Factory{
+				IOStreams: ios,
+				BaseRepo: func() (ghrepo.Interface, error) {
+					return ghrepo.FromFullName("owner/repo")
+				},
+				Prompter: pm,
+				Remotes: func() (ghContext.Remotes, error) {
+					return tt.remotes, nil
+				},
+			}
+
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+
+			argv, err := shlex.Split(tt.args)
+			assert.NoError(t, err)
+
+			var gotOpts *ListOptions
+			cmd := NewCmdList(f, func(opts *ListOptions) error {
+				gotOpts = opts
+				return nil
+			})
+			// Require to support --repo flag
+			cmdutil.EnableRepoOverride(cmd, f)
+			cmd.SetArgs(argv)
+			cmd.SetIn(&bytes.Buffer{})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			_, err = cmd.ExecuteC()
+			require.NoError(t, err)
+
+			baseRepo, err := gotOpts.BaseRepo()
+			if tt.wantErr != nil {
+				require.Equal(t, tt.wantErr, err)
+				return
+			}
+			require.True(t, ghrepo.IsSame(tt.wantRepo, baseRepo))
 		})
 	}
 }
@@ -305,6 +459,58 @@ func Test_listRun(t *testing.T) {
 				"SECRET_THREE\t1975-11-30T00:00:00Z\tSELECTED",
 			},
 		},
+		{
+			name: "Agents repo tty",
+			tty:  true,
+			opts: &ListOptions{
+				Application: "Agents",
+			},
+			wantOut: []string{
+				"NAME          UPDATED",
+				"SECRET_ONE    about 34 years ago",
+				"SECRET_TWO    about 2 years ago",
+				"SECRET_THREE  about 47 years ago",
+			},
+		},
+		{
+			name: "Agents repo not tty",
+			tty:  false,
+			opts: &ListOptions{
+				Application: "Agents",
+			},
+			wantOut: []string{
+				"SECRET_ONE\t1988-10-11T00:00:00Z",
+				"SECRET_TWO\t2020-12-04T00:00:00Z",
+				"SECRET_THREE\t1975-11-30T00:00:00Z",
+			},
+		},
+		{
+			name: "Agents org tty",
+			tty:  true,
+			opts: &ListOptions{
+				Application: "Agents",
+				OrgName:     "UmbrellaCorporation",
+			},
+			wantOut: []string{
+				"NAME          UPDATED             VISIBILITY",
+				"SECRET_ONE    about 34 years ago  Visible to all repositories",
+				"SECRET_TWO    about 2 years ago   Visible to private repositories",
+				"SECRET_THREE  about 47 years ago  Visible to 2 selected repositories",
+			},
+		},
+		{
+			name: "Agents org not tty",
+			tty:  false,
+			opts: &ListOptions{
+				Application: "Agents",
+				OrgName:     "UmbrellaCorporation",
+			},
+			wantOut: []string{
+				"SECRET_ONE\t1988-10-11T00:00:00Z\tALL",
+				"SECRET_TWO\t2020-12-04T00:00:00Z\tPRIVATE",
+				"SECRET_THREE\t1975-11-30T00:00:00Z\tSELECTED",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -404,6 +610,8 @@ func Test_listRun(t *testing.T) {
 
 			if tt.opts.Application == "Dependabot" {
 				path = strings.Replace(path, "actions", "dependabot", 1)
+			} else if tt.opts.Application == "Agents" {
+				path = strings.Replace(path, "actions", "agents", 1)
 			}
 
 			reg.Register(httpmock.REST("GET", path), httpmock.JSONResponse(payload))
@@ -420,7 +628,7 @@ func Test_listRun(t *testing.T) {
 				return &http.Client{Transport: reg}, nil
 			}
 			tt.opts.Config = func() (gh.Config, error) {
-				return config.NewBlankConfig(), nil
+				return config.NewMockConfig(), nil
 			}
 			tt.opts.Now = func() time.Time {
 				t, _ := time.Parse(time.RFC822, "15 Mar 23 00:00 UTC")
@@ -613,7 +821,7 @@ func Test_listRun_populatesNumSelectedReposIfRequired(t *testing.T) {
 				return &http.Client{Transport: reg}, nil
 			}
 			opts.Config = func() (gh.Config, error) {
-				return config.NewBlankConfig(), nil
+				return config.NewMockConfig(), nil
 			}
 			opts.Now = func() time.Time {
 				t, _ := time.Parse(time.RFC822, "4 Apr 24 00:00 UTC")
@@ -650,7 +858,9 @@ func Test_getSecrets_pagination(t *testing.T) {
 		httpmock.StringResponse(`{"secrets":[{},{}]}`),
 	)
 	client := &http.Client{Transport: reg}
-	secrets, err := getSecrets(client, "github.com", "path/to")
+	u, err := safeurl.JoinPath("path", "to")
+	require.NoError(t, err)
+	secrets, err := getSecrets(client, "github.com", u)
 	assert.NoError(t, err)
 	assert.Equal(t, 4, len(secrets))
 }

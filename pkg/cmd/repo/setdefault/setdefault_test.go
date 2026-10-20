@@ -21,8 +21,10 @@ func TestNewCmdSetDefault(t *testing.T) {
 	tests := []struct {
 		name     string
 		gitStubs func(*run.CommandStubber)
+		remotes  func() (context.Remotes, error)
 		input    string
 		output   SetDefaultOptions
+		nonTTY   bool
 		wantErr  bool
 		errMsg   string
 	}{
@@ -43,11 +45,13 @@ func TestNewCmdSetDefault(t *testing.T) {
 			output: SetDefaultOptions{Repo: ghrepo.New("cli", "cli")},
 		},
 		{
-			name:     "invalid repo argument",
-			gitStubs: func(cs *run.CommandStubber) {},
-			input:    "some_invalid_format",
-			wantErr:  true,
-			errMsg:   `expected the "[HOST/]OWNER/REPO" format, got "some_invalid_format"`,
+			name: "invalid repo argument",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			input:   "some_invalid_format",
+			wantErr: true,
+			errMsg:  `given arg is not a valid repo or git remote: expected the "[HOST/]OWNER/REPO" format, got "some_invalid_format"`,
 		},
 		{
 			name: "view flag",
@@ -56,6 +60,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 			},
 			input:  "--view",
 			output: SetDefaultOptions{ViewMode: true},
+			nonTTY: true,
 		},
 		{
 			name: "unset flag",
@@ -64,6 +69,17 @@ func TestNewCmdSetDefault(t *testing.T) {
 			},
 			input:  "--unset",
 			output: SetDefaultOptions{UnsetMode: true},
+			nonTTY: true,
+		},
+		{
+			name: "no argument when not running interactively",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			input:   "",
+			nonTTY:  true,
+			wantErr: true,
+			errMsg:  "repository required when not running interactively",
 		},
 		{
 			name: "run from non-git directory",
@@ -74,16 +90,56 @@ func TestNewCmdSetDefault(t *testing.T) {
 			wantErr: true,
 			errMsg:  "must be run from inside a git repository",
 		},
+		{
+			name: "remote name argument",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			remotes: func() (context.Remotes, error) {
+				return context.Remotes{
+					{
+						Remote: &git.Remote{Name: "origin"},
+						Repo:   ghrepo.New("OWNER", "REPO"),
+					},
+				}, nil
+			},
+			input:  "origin",
+			output: SetDefaultOptions{Repo: ghrepo.New("OWNER", "REPO")},
+		},
+		{
+			name: "repo argument despite remote name matching owner/repo",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			remotes: func() (context.Remotes, error) {
+				return context.Remotes{
+					{
+						Remote: &git.Remote{Name: "OWNER/REPO"},
+						Repo:   ghrepo.New("OTHER", "REPO"),
+					},
+				}, nil
+			},
+			input:  "OWNER/REPO",
+			output: SetDefaultOptions{Repo: ghrepo.New("OWNER", "REPO")},
+		},
 	}
 
 	for _, tt := range tests {
 		io, _, _, _ := iostreams.Test()
 		io.SetStdoutTTY(true)
-		io.SetStdinTTY(true)
+		io.SetStdinTTY(!tt.nonTTY)
 		io.SetStderrTTY(true)
+		remotesFunc := tt.remotes
+		if remotesFunc == nil {
+			remotesFunc = func() (context.Remotes, error) {
+				return context.Remotes{}, nil
+			}
+		}
+
 		f := &cmdutil.Factory{
 			IOStreams: io,
 			GitClient: &git.Client{GitPath: "/fake/path/to/git"},
+			Remotes:   remotesFunc,
 		}
 
 		var gotOpts *SetDefaultOptions
@@ -114,6 +170,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.output.Repo, gotOpts.Repo)
 			assert.Equal(t, tt.output.ViewMode, gotOpts.ViewMode)
+			assert.Equal(t, tt.output.UnsetMode, gotOpts.UnsetMode)
 		})
 	}
 }
@@ -176,7 +233,7 @@ func TestDefaultRun(t *testing.T) {
 					Repo:   repo1,
 				},
 			},
-			wantStderr: "no default repository has been set; use `gh repo set-default` to select one\n",
+			wantStderr: "X No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
 		},
 		{
 			name: "view mode no current default",
@@ -188,7 +245,7 @@ func TestDefaultRun(t *testing.T) {
 					Repo:   repo1,
 				},
 			},
-			wantStderr: "no default repository has been set; use `gh repo set-default` to select one\n",
+			wantStderr: "X No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
 		},
 		{
 			name: "view mode with base resolved current default",
@@ -382,7 +439,7 @@ func TestDefaultRun(t *testing.T) {
 					}
 				}
 			},
-			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n - adding repository and environment secrets\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
+			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n\n### NOTE: gh does not use the default repository for managing repository and environment secrets.\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
 		},
 		{
 			name: "interactive mode only one known host",
@@ -432,7 +489,7 @@ func TestDefaultRun(t *testing.T) {
             "repo_004":{"name":"REPO5","owner":{"login":"OWNER5"}},
             "repo_005":{"name":"REPO6","owner":{"login":"OWNER6"}}
           }}`,
-						func(query string, inputs map[string]interface{}) {
+						func(query string, inputs map[string]any) {
 							assert.Contains(t, query, "repo_000")
 							assert.Contains(t, query, "repo_001")
 							assert.Contains(t, query, "repo_002")
@@ -456,7 +513,7 @@ func TestDefaultRun(t *testing.T) {
 					}
 				}
 			},
-			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n - adding repository and environment secrets\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
+			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n\n### NOTE: gh does not use the default repository for managing repository and environment secrets.\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
 		},
 	}
 

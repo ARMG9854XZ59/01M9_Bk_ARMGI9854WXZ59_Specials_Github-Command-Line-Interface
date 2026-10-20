@@ -3,14 +3,21 @@
 package verify
 
 import (
+	"net/http"
 	"testing"
 
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/telemetry"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/api"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/artifact/oci"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/io"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 	"github.com/cli/cli/v2/pkg/cmd/factory"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	o "github.com/cli/cli/v2/pkg/option"
+	"github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,27 +25,37 @@ func TestVerifyIntegration(t *testing.T) {
 	logger := io.NewTestHandler()
 
 	sigstoreConfig := verification.SigstoreConfig{
-		Logger: logger,
+		ExternalHttpClient: http.DefaultClient,
+		Logger:             logger,
+		TUFMetadataDir:     o.Some(t.TempDir()),
 	}
 
-	cmdFactory := factory.New("test")
+	ios, _, _, _ := iostreams.Test()
+	hc, err := factory.HttpClientFunc(
+		func() (gh.Config, error) { return config.NewMockConfig(), nil },
+		ios,
+		"test",
+		"",
+		&telemetry.NoOpService{},
+	)()
+	require.NoError(t, err)
 
-	hc, err := cmdFactory.HttpClient()
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, _ := auth.DefaultHost()
 
+	sigstoreVerifier, err := verification.NewLiveSigstoreVerifier(sigstoreConfig)
+	require.NoError(t, err)
 	publicGoodOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
+		APIClient:        api.NewLiveClient(hc, http.DefaultClient, host, logger),
 		ArtifactPath:     artifactPath,
 		BundlePath:       bundlePath,
 		DigestAlgorithm:  "sha512",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
 		Owner:            "sigstore",
+		PredicateType:    verification.SLSAPredicateV1,
 		SANRegex:         "^https://github.com/sigstore/",
-		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
+		SigstoreVerifier: sigstoreVerifier,
 	}
 
 	t.Run("with valid owner", func(t *testing.T) {
@@ -72,13 +89,129 @@ func TestVerifyIntegration(t *testing.T) {
 		require.ErrorContains(t, err, "expected SourceRepositoryOwnerURI to be https://github.com/fakeowner, got https://github.com/sigstore")
 	})
 
-	t.Run("with invalid owner and invalid repo", func(t *testing.T) {
+	t.Run("with no matching OIDC issuer", func(t *testing.T) {
 		opts := publicGoodOpts
-		opts.Repo = "fakeowner/fakerepo"
+		opts.OIDCIssuer = "some-other-issuer"
 
 		err := runVerify(&opts)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "expected SourceRepositoryURI to be https://github.com/fakeowner/fakerepo, got https://github.com/sigstore/sigstore-js")
+		require.ErrorContains(t, err, "expected Issuer to be some-other-issuer, got https://token.actions.githubusercontent.com")
+	})
+
+	t.Run("with invalid SAN", func(t *testing.T) {
+		opts := publicGoodOpts
+		opts.SAN = "fake san"
+
+		err := runVerify(&opts)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "verifying with issuer \"sigstore.dev\"")
+	})
+
+	t.Run("with invalid SAN regex", func(t *testing.T) {
+		opts := publicGoodOpts
+		opts.SANRegex = "^https://github.com/sigstore/not-real/"
+
+		err := runVerify(&opts)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "verifying with issuer \"sigstore.dev\"")
+	})
+
+	t.Run("with bundle from OCI registry", func(t *testing.T) {
+		sigstoreVerifier, err := verification.NewLiveSigstoreVerifier(sigstoreConfig)
+		require.NoError(t, err)
+		opts := Options{
+			APIClient:             api.NewLiveClient(hc, http.DefaultClient, host, logger),
+			ArtifactPath:          "oci://ghcr.io/github/artifact-attestations-helm-charts/policy-controller:v0.10.0-github9",
+			UseBundleFromRegistry: true,
+			DigestAlgorithm:       "sha256",
+			Logger:                logger,
+			OCIClient:             oci.NewLiveClient(),
+			OIDCIssuer:            verification.GitHubOIDCIssuer,
+			Owner:                 "github",
+			PredicateType:         verification.SLSAPredicateV1,
+			SANRegex:              "^https://github.com/github/",
+			SigstoreVerifier:      sigstoreVerifier,
+		}
+
+		err = runVerify(&opts)
+		require.NoError(t, err)
+	})
+}
+
+func TestVerifyIntegrationCustomIssuer(t *testing.T) {
+	artifactPath := test.NormalizeRelativePath("../test/data/custom-issuer-artifact")
+	bundlePath := test.NormalizeRelativePath("../test/data/custom-issuer.sigstore.json")
+
+	logger := io.NewTestHandler()
+
+	sigstoreConfig := verification.SigstoreConfig{
+		ExternalHttpClient: http.DefaultClient,
+		Logger:             logger,
+		TUFMetadataDir:     o.Some(t.TempDir()),
+	}
+
+	ios, _, _, _ := iostreams.Test()
+	hc, err := factory.HttpClientFunc(
+		func() (gh.Config, error) { return config.NewMockConfig(), nil },
+		ios,
+		"test",
+		"",
+		&telemetry.NoOpService{},
+	)()
+	require.NoError(t, err)
+
+	host, _ := auth.DefaultHost()
+
+	sigstoreVerifier, err := verification.NewLiveSigstoreVerifier(sigstoreConfig)
+	require.NoError(t, err)
+	baseOpts := Options{
+		APIClient:        api.NewLiveClient(hc, http.DefaultClient, host, logger),
+		ArtifactPath:     artifactPath,
+		BundlePath:       bundlePath,
+		DigestAlgorithm:  "sha256",
+		Logger:           logger,
+		OCIClient:        oci.NewLiveClient(),
+		OIDCIssuer:       "https://token.actions.githubusercontent.com/hammer-time",
+		PredicateType:    verification.SLSAPredicateV1,
+		SigstoreVerifier: sigstoreVerifier,
+	}
+
+	t.Run("with owner and valid workflow SAN", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.SAN = "https://github.com/too-legit/attest/.github/workflows/integration.yml@refs/heads/main"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with owner and valid workflow SAN regex", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.SANRegex = "^https://github.com/too-legit/attest"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with repo and valid workflow SAN", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.Repo = "too-legit/attest"
+		opts.SAN = "https://github.com/too-legit/attest/.github/workflows/integration.yml@refs/heads/main"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with repo and valid workflow SAN regex", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.Repo = "too-legit/attest"
+		opts.SANRegex = "^https://github.com/too-legit/attest"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
 	})
 }
 
@@ -89,25 +222,36 @@ func TestVerifyIntegrationReusableWorkflow(t *testing.T) {
 	logger := io.NewTestHandler()
 
 	sigstoreConfig := verification.SigstoreConfig{
-		Logger: logger,
+		ExternalHttpClient: http.DefaultClient,
+		Logger:             logger,
+		TUFMetadataDir:     o.Some(t.TempDir()),
 	}
 
-	cmdFactory := factory.New("test")
+	cfg := config.NewMockConfig()
+	ios, _, _, _ := iostreams.Test()
+	hc, err := factory.HttpClientFunc(
+		func() (gh.Config, error) { return cfg, nil },
+		ios,
+		"test",
+		"",
+		&telemetry.NoOpService{},
+	)()
+	require.NoError(t, err)
 
-	hc, err := cmdFactory.HttpClient()
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, _ := auth.DefaultHost()
 
+	sigstoreVerifier, err := verification.NewLiveSigstoreVerifier(sigstoreConfig)
+	require.NoError(t, err)
 	baseOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
+		APIClient:        api.NewLiveClient(hc, http.DefaultClient, host, logger),
 		ArtifactPath:     artifactPath,
 		BundlePath:       bundlePath,
 		DigestAlgorithm:  "sha256",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
-		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
+		PredicateType:    verification.SLSAPredicateV1,
+		SigstoreVerifier: sigstoreVerifier,
 	}
 
 	t.Run("with owner and valid reusable workflow SAN", func(t *testing.T) {
@@ -175,34 +319,48 @@ func TestVerifyIntegrationReusableWorkflowSignerWorkflow(t *testing.T) {
 	logger := io.NewTestHandler()
 
 	sigstoreConfig := verification.SigstoreConfig{
-		Logger: logger,
+		ExternalHttpClient: http.DefaultClient,
+		Logger:             logger,
+		TUFMetadataDir:     o.Some(t.TempDir()),
 	}
 
-	cmdFactory := factory.New("test")
+	cfg := config.NewMockConfig()
+	ios, _, _, _ := iostreams.Test()
+	hc, err := factory.HttpClientFunc(
+		func() (gh.Config, error) { return cfg, nil },
+		ios,
+		"test",
+		"",
+		&telemetry.NoOpService{},
+	)()
+	require.NoError(t, err)
 
-	hc, err := cmdFactory.HttpClient()
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, _ := auth.DefaultHost()
 
+	sigstoreVerifier, err := verification.NewLiveSigstoreVerifier(sigstoreConfig)
+	require.NoError(t, err)
 	baseOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
-		ArtifactPath:     artifactPath,
-		BundlePath:       bundlePath,
-		Config:           cmdFactory.Config,
+		APIClient:    api.NewLiveClient(hc, http.DefaultClient, host, logger),
+		ArtifactPath: artifactPath,
+		BundlePath:   bundlePath,
+		Config: func() (gh.Config, error) {
+			return cfg, nil
+		},
 		DigestAlgorithm:  "sha256",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
 		Owner:            "malancas",
+		PredicateType:    verification.SLSAPredicateV1,
 		Repo:             "malancas/attest-demo",
-		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
+		SigstoreVerifier: sigstoreVerifier,
 	}
 
 	type testcase struct {
 		name           string
 		signerWorkflow string
 		expectErr      bool
+		host           string
 	}
 
 	testcases := []testcase{
@@ -220,12 +378,14 @@ func TestVerifyIntegrationReusableWorkflowSignerWorkflow(t *testing.T) {
 			name:           "valid signer workflow without host (defaults to github.com)",
 			signerWorkflow: "github/artifact-attestations-workflows/.github/workflows/attest.yml",
 			expectErr:      false,
+			host:           "github.com",
 		},
 	}
 
 	for _, tc := range testcases {
 		opts := baseOpts
 		opts.SignerWorkflow = tc.signerWorkflow
+		opts.Hostname = tc.host
 
 		err := runVerify(&opts)
 		if tc.expectErr {

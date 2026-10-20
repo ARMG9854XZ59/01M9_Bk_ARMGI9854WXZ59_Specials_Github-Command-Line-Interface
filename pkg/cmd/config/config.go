@@ -20,10 +20,10 @@ func NewCmdConfig(f *cmdutil.Factory) *cobra.Command {
 	for _, co := range config.Options {
 		longDoc.WriteString(fmt.Sprintf("- `%s`: %s", co.Key, co.Description))
 		if len(co.AllowedValues) > 0 {
-			longDoc.WriteString(fmt.Sprintf(" {%s}", strings.Join(co.AllowedValues, "|")))
+			longDoc.WriteString(fmt.Sprintf(" `{%s}`", strings.Join(co.AllowedValues, " | ")))
 		}
 		if co.DefaultValue != "" {
-			longDoc.WriteString(fmt.Sprintf(" (default %s)", co.DefaultValue))
+			longDoc.WriteString(fmt.Sprintf(" (default `%s`)", co.DefaultValue))
 		}
 		longDoc.WriteRune('\n')
 	}

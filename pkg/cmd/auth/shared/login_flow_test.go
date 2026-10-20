@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/run"
 	"github.com/cli/cli/v2/pkg/cmd/auth/shared/gitcredentials"
@@ -29,6 +30,47 @@ func (c tinyConfig) Login(host, username, token, gitProtocol string, encrypt boo
 
 func (c tinyConfig) UsersForHost(hostname string) []string {
 	return nil
+}
+
+func TestShouldCopyToClipboard(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		flagValue  *bool
+		want       bool
+	}{
+		{
+			name: "enabled by default",
+			want: true,
+		},
+		{
+			name:       "enabled by configuration",
+			configured: "enabled",
+			want:       true,
+		},
+		{
+			name:       "explicit flag enables disabled configuration",
+			configured: "disabled",
+			flagValue:  new(true),
+			want:       true,
+		},
+		{
+			name:       "explicit flag disables enabled configuration",
+			configured: "enabled",
+			flagValue:  new(false),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewMockConfig()
+			if tt.configured != "" {
+				cfg.Set("", "clipboard", tt.configured)
+			}
+
+			require.Equal(t, tt.want, ShouldCopyToClipboard(cfg, tt.flagValue))
+		})
+	}
 }
 
 func TestLogin(t *testing.T) {
@@ -101,10 +143,7 @@ func TestLogin(t *testing.T) {
 					// simulate that the public key file has been generated
 					_ = os.WriteFile(keyFile+".pub", []byte("PUBKEY asdf"), 0600)
 				})
-				opts.sshContext = ssh.Context{
-					ConfigDir: dir,
-					KeygenExe: "ssh-keygen",
-				}
+				opts.sshContext = ssh.NewContextForTests(dir, "ssh-keygen")
 			},
 			wantsConfig: map[string]string{
 				"example.com:user":         "monalisa",
@@ -112,6 +151,11 @@ func TestLogin(t *testing.T) {
 				"example.com:git_protocol": "ssh",
 			},
 			stderrAssert: func(t *testing.T, opts *LoginOptions, stderr string) {
+				sshDir, err := opts.sshContext.SshDir()
+				if err != nil {
+					t.Errorf("Could not load ssh config dir: %v", err)
+				}
+
 				assert.Equal(t, heredoc.Docf(`
 				Tip: you can generate a Personal Access Token here https://example.com/settings/tokens
 				The minimum required scopes are 'repo', 'read:org', 'admin:public_key'.
@@ -119,7 +163,7 @@ func TestLogin(t *testing.T) {
 				✓ Configured git protocol
 				✓ Uploaded the SSH key to your GitHub account: %s
 				✓ Logged in as monalisa
-			`, filepath.Join(opts.sshContext.ConfigDir, "id_ed25519.pub")), stderr)
+			`, filepath.Join(sshDir, "id_ed25519.pub")), stderr)
 			},
 		},
 		{
@@ -179,10 +223,7 @@ func TestLogin(t *testing.T) {
 					// simulate that the public key file has been generated
 					_ = os.WriteFile(keyFile+".pub", []byte("PUBKEY asdf"), 0600)
 				})
-				opts.sshContext = ssh.Context{
-					ConfigDir: dir,
-					KeygenExe: "ssh-keygen",
-				}
+				opts.sshContext = ssh.NewContextForTests(dir, "ssh-keygen")
 			},
 			wantsConfig: map[string]string{
 				"example.com:user":         "monalisa",
@@ -190,6 +231,11 @@ func TestLogin(t *testing.T) {
 				"example.com:git_protocol": "ssh",
 			},
 			stderrAssert: func(t *testing.T, opts *LoginOptions, stderr string) {
+				sshDir, err := opts.sshContext.SshDir()
+				if err != nil {
+					t.Errorf("Could not load ssh config dir: %v", err)
+				}
+
 				assert.Equal(t, heredoc.Docf(`
 				Tip: you can generate a Personal Access Token here https://example.com/settings/tokens
 				The minimum required scopes are 'repo', 'read:org', 'admin:public_key'.
@@ -197,7 +243,7 @@ func TestLogin(t *testing.T) {
 				✓ Configured git protocol
 				✓ Uploaded the SSH key to your GitHub account: %s
 				✓ Logged in as monalisa
-			`, filepath.Join(opts.sshContext.ConfigDir, "id_ed25519.pub")), stderr)
+			`, filepath.Join(sshDir, "id_ed25519.pub")), stderr)
 			},
 		},
 		{

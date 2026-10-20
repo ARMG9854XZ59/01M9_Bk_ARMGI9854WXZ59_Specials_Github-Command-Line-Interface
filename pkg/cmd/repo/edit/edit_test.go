@@ -30,9 +30,94 @@ func TestNewCmdEdit(t *testing.T) {
 			wantOpts: EditOptions{
 				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
 				Edits: EditRepositoryInput{
-					Description: sp("hello"),
+					Description: new("hello"),
 				},
 			},
+		},
+		{
+			name: "deny public visibility change without accepting consequences",
+			args: "--visibility public",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits:      EditRepositoryInput{},
+			},
+			wantErr: "use of --visibility flag requires --accept-visibility-change-consequences flag",
+		},
+		{
+			name: "allow public visibility change with accepting consequences",
+			args: "--visibility public --accept-visibility-change-consequences",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					Visibility: new("public"),
+				},
+			},
+		},
+		{
+			name: "deny private visibility change without accepting consequences",
+			args: "--visibility private",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits:      EditRepositoryInput{},
+			},
+			wantErr: "use of --visibility flag requires --accept-visibility-change-consequences flag",
+		},
+		{
+			name: "allow private visibility change with accepting consequences",
+			args: "--visibility private --accept-visibility-change-consequences",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					Visibility: new("private"),
+				},
+			},
+		},
+		{
+			name: "deny internal visibility change without accepting consequences",
+			args: "--visibility internal",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits:      EditRepositoryInput{},
+			},
+			wantErr: "use of --visibility flag requires --accept-visibility-change-consequences flag",
+		},
+		{
+			name: "allow internal visibility change with accepting consequences",
+			args: "--visibility internal --accept-visibility-change-consequences",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					Visibility: new("internal"),
+				},
+			},
+		},
+		{
+			name: "squash merge commit message with enable-squash-merge",
+			args: "--enable-squash-merge --squash-merge-commit-message pr-title",
+			wantOpts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					squashMergeCommitMsg:     new("pr-title"),
+					EnableSquashMerge:        new(true),
+					SquashMergeCommitTitle:   new("PR_TITLE"),
+					SquashMergeCommitMessage: new("BLANK"),
+				},
+			},
+		},
+		{
+			name:    "squash merge commit message without enable-squash-merge",
+			args:    "--squash-merge-commit-message default",
+			wantErr: "--squash-merge-commit-message requires --enable-squash-merge",
+		},
+		{
+			name:    "squash merge commit message with invalid value",
+			args:    "--enable-squash-merge --squash-merge-commit-message blah",
+			wantErr: `invalid value for --squash-merge-commit-message: "blah". Valid values are: default, pr-title, pr-title-commits, pr-title-description`,
+		},
+		{
+			name:    "squash merge commit message with enable-squash-merge=false",
+			args:    "--enable-squash-merge=false --squash-merge-commit-message default",
+			wantErr: "--squash-merge-commit-message cannot be used when --enable-squash-merge=false",
 		},
 	}
 
@@ -94,14 +179,14 @@ func Test_editRun(t *testing.T) {
 			opts: EditOptions{
 				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
 				Edits: EditRepositoryInput{
-					Homepage:    sp("newURL"),
-					Description: sp("hello world!"),
+					Homepage:    new("newURL"),
+					Description: new("hello world!"),
 				},
 			},
 			httpStubs: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, 2, len(payload))
 						assert.Equal(t, "newURL", payload["homepage"])
 						assert.Equal(t, "hello world!", payload["description"])
@@ -121,9 +206,9 @@ func Test_editRun(t *testing.T) {
 					httpmock.StringResponse(`{"names":["topic2", "topic3", "go"]}`))
 				r.Register(
 					httpmock.REST("PUT", "repos/OWNER/REPO/topics"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, 1, len(payload))
-						assert.Equal(t, []interface{}{"topic2", "go", "topic1"}, payload["names"])
+						assert.Equal(t, []any{"topic2", "go", "topic1"}, payload["names"])
 					}))
 			},
 		},
@@ -132,17 +217,96 @@ func Test_editRun(t *testing.T) {
 			opts: EditOptions{
 				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
 				Edits: EditRepositoryInput{
-					AllowUpdateBranch: bp(true),
+					AllowUpdateBranch: new(true),
 				},
 			},
 			httpStubs: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, 1, len(payload))
 						assert.Equal(t, true, payload["allow_update_branch"])
 					}))
 			},
+		},
+		{
+			name: "enable/disable security and analysis settings",
+			opts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					SecurityAndAnalysis: &SecurityAndAnalysisInput{
+						EnableAdvancedSecurity: &SecurityAndAnalysisStatus{
+							Status: new("enabled"),
+						},
+						EnableSecretScanning: &SecurityAndAnalysisStatus{
+							Status: new("enabled"),
+						},
+						EnableSecretScanningPushProtection: &SecurityAndAnalysisStatus{
+							Status: new("disabled"),
+						},
+					},
+				},
+			},
+			httpStubs: func(t *testing.T, r *httpmock.Registry) {
+				r.Register(
+					httpmock.GraphQL(`query RepositoryInfo\b`),
+					httpmock.StringResponse(`{"data": { "repository": { "viewerCanAdminister": true } } }`))
+
+				r.Register(
+					httpmock.REST("PATCH", "repos/OWNER/REPO"),
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
+						assert.Equal(t, 1, len(payload))
+						securityAndAnalysis := payload["security_and_analysis"].(map[string]any)
+						assert.Equal(t, "enabled", securityAndAnalysis["advanced_security"].(map[string]any)["status"])
+						assert.Equal(t, "enabled", securityAndAnalysis["secret_scanning"].(map[string]any)["status"])
+						assert.Equal(t, "disabled", securityAndAnalysis["secret_scanning_push_protection"].(map[string]any)["status"])
+					}))
+			},
+		},
+		{
+			name: "set squash merge commit message to pr-title-description",
+			opts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					EnableSquashMerge:        new(true),
+					SquashMergeCommitTitle:   new("PR_TITLE"),
+					SquashMergeCommitMessage: new("PR_BODY"),
+				},
+			},
+			httpStubs: func(t *testing.T, r *httpmock.Registry) {
+				r.Register(
+					httpmock.REST("PATCH", "repos/OWNER/REPO"),
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
+						assert.Equal(t, true, payload["allow_squash_merge"])
+						assert.Equal(t, "PR_TITLE", payload["squash_merge_commit_title"])
+						assert.Equal(t, "PR_BODY", payload["squash_merge_commit_message"])
+					}))
+			},
+		},
+		{
+			name: "does not have sufficient permissions for security edits",
+			opts: EditOptions{
+				Repository: ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				Edits: EditRepositoryInput{
+					SecurityAndAnalysis: &SecurityAndAnalysisInput{
+						EnableAdvancedSecurity: &SecurityAndAnalysisStatus{
+							Status: new("enabled"),
+						},
+						EnableSecretScanning: &SecurityAndAnalysisStatus{
+							Status: new("enabled"),
+						},
+						EnableSecretScanningPushProtection: &SecurityAndAnalysisStatus{
+							Status: new("disabled"),
+						},
+					},
+				},
+			},
+			httpStubs: func(t *testing.T, r *httpmock.Registry) {
+				r.Register(
+					httpmock.GraphQL(`query RepositoryInfo\b`),
+					httpmock.StringResponse(`{"data": { "repository": { "viewerCanAdminister": false } } }`))
+			},
+			wantsErr: "you do not have sufficient permissions to edit repository security and analysis features",
 		},
 	}
 
@@ -236,10 +400,113 @@ func Test_editRun_interactive(t *testing.T) {
 					}`))
 				reg.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, true, payload["allow_forking"])
 					}))
 			},
+		},
+		{
+			name: "skipping visibility without confirmation",
+			opts: EditOptions{
+				Repository:      ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				InteractiveMode: true,
+			},
+			promptStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterMultiSelect("What do you want to edit?", nil, editList,
+					func(_ string, _, opts []string) ([]int, error) {
+						return []int{8}, nil
+					})
+				pm.RegisterSelect("Visibility", []string{"public", "private", "internal"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "private")
+					})
+				pm.RegisterConfirm("Do you want to change visibility to private?", func(_ string, _ bool) (bool, error) {
+					return false, nil
+				})
+			},
+			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query RepositoryInfo\b`),
+					httpmock.StringResponse(`
+					{
+						"data": {
+							"repository": {
+								"visibility": "public",
+								"description": "description",
+								"homePageUrl": "https://url.com",
+								"defaultBranchRef": {
+									"name": "main"
+								},
+								"stargazerCount": 10,
+								"isInOrganization": false,
+								"repositoryTopics": {
+									"nodes": [{
+										"topic": {
+											"name": "x"
+										}
+									}]
+								}
+							}
+						}
+					}`))
+				reg.Exclude(t, httpmock.REST("PATCH", "repos/OWNER/REPO"))
+			},
+			wantsStderr: "Changing the repository visibility to private will cause permanent loss of 10 stars and 0 watchers.",
+		},
+		{
+			name: "changing visibility with confirmation",
+			opts: EditOptions{
+				Repository:      ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				InteractiveMode: true,
+			},
+			promptStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterMultiSelect("What do you want to edit?", nil, editList,
+					func(_ string, _, opts []string) ([]int, error) {
+						return []int{8}, nil
+					})
+				pm.RegisterSelect("Visibility", []string{"public", "private", "internal"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "private")
+					})
+				pm.RegisterConfirm("Do you want to change visibility to private?", func(_ string, _ bool) (bool, error) {
+					return true, nil
+				})
+			},
+			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query RepositoryInfo\b`),
+					httpmock.StringResponse(`
+					{
+						"data": {
+							"repository": {
+								"visibility": "public",
+								"description": "description",
+								"homePageUrl": "https://url.com",
+								"defaultBranchRef": {
+									"name": "main"
+								},
+								"stargazerCount": 10,
+								"watchers": {
+									"totalCount": 15
+								},
+								"isInOrganization": false,
+								"repositoryTopics": {
+									"nodes": [{
+										"topic": {
+											"name": "x"
+										}
+									}]
+								}
+							}
+						}
+					}`))
+				reg.Register(
+					httpmock.REST("PATCH", "repos/OWNER/REPO"),
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
+						assert.Equal(t, "private", payload["visibility"])
+					}))
+			},
+			wantsStderr: "Changing the repository visibility to private will cause permanent loss of 10 stars and 15 watchers",
 		},
 		{
 			name: "the rest",
@@ -250,7 +517,7 @@ func Test_editRun_interactive(t *testing.T) {
 			promptStubs: func(pm *prompter.MockPrompter) {
 				pm.RegisterMultiSelect("What do you want to edit?", nil, editList,
 					func(_ string, _, opts []string) ([]int, error) {
-						return []int{0, 2, 3, 5, 6, 8, 9}, nil
+						return []int{0, 2, 3, 5, 6, 9}, nil
 					})
 				pm.RegisterInput("Default branch name", func(_, _ string) (string, error) {
 					return "trunk", nil
@@ -265,13 +532,6 @@ func Test_editRun_interactive(t *testing.T) {
 					return true, nil
 				})
 				pm.RegisterConfirm("Convert into a template repository?", func(_ string, _ bool) (bool, error) {
-					return true, nil
-				})
-				pm.RegisterSelect("Visibility", []string{"public", "private", "internal"},
-					func(_, _ string, opts []string) (int, error) {
-						return prompter.IndexFor(opts, "private")
-					})
-				pm.RegisterConfirm("Do you want to change visibility to private?", func(_ string, _ bool) (bool, error) {
 					return true, nil
 				})
 				pm.RegisterConfirm("Enable Wikis?", func(_ string, _ bool) (bool, error) {
@@ -305,12 +565,11 @@ func Test_editRun_interactive(t *testing.T) {
 					}`))
 				reg.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, "trunk", payload["default_branch"])
 						assert.Equal(t, "https://zombo.com", payload["homepage"])
 						assert.Equal(t, true, payload["has_issues"])
 						assert.Equal(t, true, payload["has_projects"])
-						assert.Equal(t, "private", payload["visibility"])
 						assert.Equal(t, true, payload["is_template"])
 						assert.Equal(t, true, payload["has_wiki"])
 					}))
@@ -357,7 +616,7 @@ func Test_editRun_interactive(t *testing.T) {
 					}`))
 				reg.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, "awesome repo description", payload["description"])
 					}))
 			},
@@ -411,18 +670,18 @@ func Test_editRun_interactive(t *testing.T) {
 					}`))
 				reg.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, "awesome repo description", payload["description"])
 					}))
 				reg.Register(
 					httpmock.REST("PUT", "repos/OWNER/REPO/topics"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
-						assert.Equal(t, []interface{}{"a", "b", "c", "d"}, payload["names"])
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
+						assert.Equal(t, []any{"a", "b", "c", "d"}, payload["names"])
 					}))
 			},
 		},
 		{
-			name: "updates repo merge options",
+			name: "updates repo merge options without squash",
 			opts: EditOptions{
 				Repository:      ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
 				InteractiveMode: true,
@@ -473,10 +732,76 @@ func Test_editRun_interactive(t *testing.T) {
 					}`))
 				reg.Register(
 					httpmock.REST("PATCH", "repos/OWNER/REPO"),
-					httpmock.RESTPayload(200, `{}`, func(payload map[string]interface{}) {
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
 						assert.Equal(t, true, payload["allow_merge_commit"])
 						assert.Equal(t, false, payload["allow_squash_merge"])
 						assert.Equal(t, true, payload["allow_rebase_merge"])
+					}))
+			},
+		},
+		{
+			name: "updates repo merge options with squash and commit message",
+			opts: EditOptions{
+				Repository:      ghrepo.NewWithHost("OWNER", "REPO", "github.com"),
+				InteractiveMode: true,
+			},
+			promptStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterMultiSelect("What do you want to edit?", nil, editList,
+					func(_ string, _, opts []string) ([]int, error) {
+						return []int{4}, nil
+					})
+				pm.RegisterMultiSelect("Allowed merge strategies", nil,
+					[]string{allowMergeCommits, allowSquashMerge, allowRebaseMerge},
+					func(_ string, _, opts []string) ([]int, error) {
+						return []int{1}, nil
+					})
+				pm.RegisterSelect("Default squash merge commit message",
+					[]string{"default", "pr-title", "pr-title-commits", "pr-title-description"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "pr-title-description")
+					})
+				pm.RegisterConfirm("Enable Auto Merge?", func(_ string, _ bool) (bool, error) {
+					return false, nil
+				})
+				pm.RegisterConfirm("Automatically delete head branches after merging?", func(_ string, _ bool) (bool, error) {
+					return false, nil
+				})
+			},
+			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.GraphQL(`query RepositoryInfo\b`),
+					httpmock.StringResponse(`
+					{
+						"data": {
+							"repository": {
+								"description": "old description",
+								"homePageUrl": "https://url.com",
+								"defaultBranchRef": {
+									"name": "main"
+								},
+								"isInOrganization": false,
+								"squashMergeAllowed": false,
+								"rebaseMergeAllowed": false,
+								"mergeCommitAllowed": true,
+								"deleteBranchOnMerge": false,
+								"repositoryTopics": {
+									"nodes": [{
+										"topic": {
+											"name": "x"
+										}
+									}]
+								}
+							}
+						}
+					}`))
+				reg.Register(
+					httpmock.REST("PATCH", "repos/OWNER/REPO"),
+					httpmock.RESTPayload(200, `{}`, func(payload map[string]any) {
+						assert.Equal(t, false, payload["allow_merge_commit"])
+						assert.Equal(t, true, payload["allow_squash_merge"])
+						assert.Equal(t, false, payload["allow_rebase_merge"])
+						assert.Equal(t, "PR_TITLE", payload["squash_merge_commit_title"])
+						assert.Equal(t, "PR_BODY", payload["squash_merge_commit_message"])
 					}))
 			},
 		},
@@ -484,7 +809,7 @@ func Test_editRun_interactive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ios, _, _, _ := iostreams.Test()
+			ios, _, _, stderr := iostreams.Test()
 			ios.SetStdoutTTY(true)
 			ios.SetStdinTTY(true)
 			ios.SetStderrTTY(true)
@@ -509,17 +834,163 @@ func Test_editRun_interactive(t *testing.T) {
 			if tt.wantsErr == "" {
 				require.NoError(t, err)
 			} else {
-				assert.EqualError(t, err, tt.wantsErr)
+				require.EqualError(t, err, tt.wantsErr)
 				return
 			}
+
+			assert.Contains(t, stderr.String(), tt.wantsStderr)
 		})
 	}
 }
 
-func sp(v string) *string {
-	return &v
+func Test_transformSecurityAndAnalysisOpts(t *testing.T) {
+	tests := []struct {
+		name string
+		opts EditOptions
+		want *SecurityAndAnalysisInput
+	}{
+		{
+			name: "Enable all security and analysis settings",
+			opts: EditOptions{
+				Edits: EditRepositoryInput{
+					enableAdvancedSecurity:             new(true),
+					enableSecretScanning:               new(true),
+					enableSecretScanningPushProtection: new(true),
+				},
+			},
+			want: &SecurityAndAnalysisInput{
+				EnableAdvancedSecurity: &SecurityAndAnalysisStatus{
+					Status: new("enabled"),
+				},
+				EnableSecretScanning: &SecurityAndAnalysisStatus{
+					Status: new("enabled"),
+				},
+				EnableSecretScanningPushProtection: &SecurityAndAnalysisStatus{
+					Status: new("enabled"),
+				},
+			},
+		},
+		{
+			name: "Disable all security and analysis settings",
+			opts: EditOptions{
+				Edits: EditRepositoryInput{
+					enableAdvancedSecurity:             new(false),
+					enableSecretScanning:               new(false),
+					enableSecretScanningPushProtection: new(false),
+				},
+			},
+			want: &SecurityAndAnalysisInput{
+				EnableAdvancedSecurity: &SecurityAndAnalysisStatus{
+					Status: new("disabled"),
+				},
+				EnableSecretScanning: &SecurityAndAnalysisStatus{
+					Status: new("disabled"),
+				},
+				EnableSecretScanningPushProtection: &SecurityAndAnalysisStatus{
+					Status: new("disabled"),
+				},
+			},
+		},
+		{
+			name: "Enable only advanced security",
+			opts: EditOptions{
+				Edits: EditRepositoryInput{
+					enableAdvancedSecurity: new(true),
+				},
+			},
+			want: &SecurityAndAnalysisInput{
+				EnableAdvancedSecurity: &SecurityAndAnalysisStatus{
+					Status: new("enabled"),
+				},
+				EnableSecretScanning:               nil,
+				EnableSecretScanningPushProtection: nil,
+			},
+		},
+		{
+			name: "Disable only secret scanning",
+			opts: EditOptions{
+				Edits: EditRepositoryInput{
+					enableSecretScanning: new(false),
+				},
+			},
+			want: &SecurityAndAnalysisInput{
+				EnableAdvancedSecurity: nil,
+				EnableSecretScanning: &SecurityAndAnalysisStatus{
+					Status: new("disabled"),
+				},
+				EnableSecretScanningPushProtection: nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &tt.opts
+			transformed := transformSecurityAndAnalysisOpts(opts)
+			assert.Equal(t, tt.want, transformed)
+		})
+	}
 }
 
-func bp(b bool) *bool {
-	return &b
+func Test_transformSquashMergeOpts(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantTitle   string
+		wantMessage string
+	}{
+		{
+			name:        "default",
+			input:       "default",
+			wantTitle:   "COMMIT_OR_PR_TITLE",
+			wantMessage: "COMMIT_MESSAGES",
+		},
+		{
+			name:        "pr-title",
+			input:       "pr-title",
+			wantTitle:   "PR_TITLE",
+			wantMessage: "BLANK",
+		},
+		{
+			name:        "pr-title-commits",
+			input:       "pr-title-commits",
+			wantTitle:   "PR_TITLE",
+			wantMessage: "COMMIT_MESSAGES",
+		},
+		{
+			name:        "pr-title-description",
+			input:       "pr-title-description",
+			wantTitle:   "PR_TITLE",
+			wantMessage: "PR_BODY",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			edits := &EditRepositoryInput{
+				squashMergeCommitMsg: new(tt.input),
+			}
+			transformSquashMergeOpts(edits)
+			assert.Equal(t, tt.wantTitle, *edits.SquashMergeCommitTitle)
+			assert.Equal(t, tt.wantMessage, *edits.SquashMergeCommitMessage)
+		})
+	}
+}
+
+func Test_transformSquashMergeOpts_unknownInput(t *testing.T) {
+	edits := &EditRepositoryInput{
+		squashMergeCommitMsg: new("unknown-value"),
+	}
+	transformSquashMergeOpts(edits)
+	assert.Nil(t, edits.SquashMergeCommitTitle)
+	assert.Nil(t, edits.SquashMergeCommitMessage)
+}
+
+func Test_validateSquashMergeCommitMsg(t *testing.T) {
+	assert.NoError(t, validateSquashMergeCommitMsg("default"))
+	assert.NoError(t, validateSquashMergeCommitMsg("pr-title"))
+	assert.NoError(t, validateSquashMergeCommitMsg("pr-title-commits"))
+	assert.NoError(t, validateSquashMergeCommitMsg("pr-title-description"))
+	assert.Error(t, validateSquashMergeCommitMsg("blah"))
+	assert.Error(t, validateSquashMergeCommitMsg(""))
 }

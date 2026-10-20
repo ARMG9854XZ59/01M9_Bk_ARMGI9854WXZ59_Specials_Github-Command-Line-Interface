@@ -1,0 +1,33 @@
+# requires-user-capability: false
+
+# Create a repository with a file so it has a default branch
+fixture-repo shared REPO
+env ISSUE_PREFIX=${SCRIPT_NAME}-${RANDOM_STRING}
+
+# Target the fixture repository
+env GH_REPO=$ORG/$REPO
+
+# Create three issues: parent A, parent B, candidate C
+exec gh issue create --title $ISSUE_PREFIX-parent-a --body ''
+stdout2env PARENT_A_URL
+
+exec gh issue create --title $ISSUE_PREFIX-parent-b --body ''
+stdout2env PARENT_B_URL
+
+exec gh issue create --title $ISSUE_PREFIX-candidate-c --body ''
+stdout2env CANDIDATE_URL
+
+# Add C as a sub-issue of A
+exec gh issue edit $PARENT_A_URL --add-sub-issue $CANDIDATE_URL
+exec gh issue view $CANDIDATE_URL --json parent --jq .parent.url
+stdout $PARENT_A_URL
+
+# Adding C as a sub-issue of B silently overwrites the existing parent
+exec gh issue edit $PARENT_B_URL --add-sub-issue $CANDIDATE_URL
+exec gh issue view $CANDIDATE_URL --json parent --jq .parent.url
+stdout $PARENT_B_URL
+
+# Removing the sub-issue from B drops the parent
+exec gh issue edit $PARENT_B_URL --remove-sub-issue $CANDIDATE_URL
+exec gh issue view $CANDIDATE_URL --json parent --jq '.parent // "null"'
+stdout '^null$'

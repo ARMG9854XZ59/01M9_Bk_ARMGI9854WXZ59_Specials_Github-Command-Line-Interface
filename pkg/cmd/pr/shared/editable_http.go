@@ -60,7 +60,31 @@ func UpdateIssue(httpClient *http.Client, repo ghrepo.Interface, id string, isPR
 
 	if dirtyExcludingLabels(options) {
 		wg.Go(func() error {
-			return replaceIssueFields(httpClient, repo, id, isPR, options)
+			// updateIssue mutation does not support Actors so assignment needs to
+			// be in a separate request when our assignees are Actors.
+			// Note: this is intentionally done synchronously with updating
+			// other issue fields to ensure consistency with how legacy
+			// user assignees are handled.
+			// https://github.com/cli/cli/pull/10960#discussion_r2086725348
+			// TODO ApiActorsSupported
+			if options.Assignees.Edited && options.ApiActorsSupported {
+				apiClient := api.NewClientFromHTTP(httpClient)
+				logins, err := options.AssigneeLogins(apiClient, repo)
+				if err != nil {
+					return err
+				}
+
+				err = api.ReplaceActorsForAssignableByLogin(apiClient, repo, id, logins)
+				if err != nil {
+					return err
+				}
+			}
+			err := replaceIssueFields(httpClient, repo, id, isPR, options)
+			if err != nil {
+				return err
+			}
+
+			return nil
 		})
 	}
 
@@ -69,14 +93,19 @@ func UpdateIssue(httpClient *http.Client, repo ghrepo.Interface, id string, isPR
 
 func replaceIssueFields(httpClient *http.Client, repo ghrepo.Interface, id string, isPR bool, options Editable) error {
 	apiClient := api.NewClientFromHTTP(httpClient)
-	assigneeIds, err := options.AssigneeIds(apiClient, repo)
-	if err != nil {
-		return err
-	}
 
 	projectIds, err := options.ProjectIds()
 	if err != nil {
 		return err
+	}
+
+	var assigneeIds *[]string
+	// TODO ApiActorsSupported
+	if !options.ApiActorsSupported {
+		assigneeIds, err = options.AssigneeIds(apiClient, repo)
+		if err != nil {
+			return err
+		}
 	}
 
 	milestoneId, err := options.MilestoneId()
@@ -132,7 +161,7 @@ func addLabels(httpClient *http.Client, id string, repo ghrepo.Interface, labels
 		} `graphql:"addLabelsToLabelable(input: $input)"`
 	}
 
-	variables := map[string]interface{}{"input": params}
+	variables := map[string]any{"input": params}
 	gql := api.NewClientFromHTTP(httpClient)
 	return gql.Mutate(repo.RepoHost(), "LabelAdd", &mutation, variables)
 }
@@ -149,7 +178,7 @@ func removeLabels(httpClient *http.Client, id string, repo ghrepo.Interface, lab
 		} `graphql:"removeLabelsFromLabelable(input: $input)"`
 	}
 
-	variables := map[string]interface{}{"input": params}
+	variables := map[string]any{"input": params}
 	gql := api.NewClientFromHTTP(httpClient)
 	return gql.Mutate(repo.RepoHost(), "LabelRemove", &mutation, variables)
 }
@@ -160,7 +189,7 @@ func updateIssue(httpClient *http.Client, repo ghrepo.Interface, params githubv4
 			Typename string `graphql:"__typename"`
 		} `graphql:"updateIssue(input: $input)"`
 	}
-	variables := map[string]interface{}{"input": params}
+	variables := map[string]any{"input": params}
 	gql := api.NewClientFromHTTP(httpClient)
 	return gql.Mutate(repo.RepoHost(), "IssueUpdate", &mutation, variables)
 }
@@ -171,7 +200,7 @@ func updatePullRequest(httpClient *http.Client, repo ghrepo.Interface, params gi
 			Typename string `graphql:"__typename"`
 		} `graphql:"updatePullRequest(input: $input)"`
 	}
-	variables := map[string]interface{}{"input": params}
+	variables := map[string]any{"input": params}
 	gql := api.NewClientFromHTTP(httpClient)
 	err := gql.Mutate(repo.RepoHost(), "PullRequestUpdate", &mutation, variables)
 	return err

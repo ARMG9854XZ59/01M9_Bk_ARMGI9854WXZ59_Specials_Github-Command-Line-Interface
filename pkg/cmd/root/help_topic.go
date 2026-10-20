@@ -42,16 +42,17 @@ var HelpTopics = []helpTopic{
 		name:  "environment",
 		short: "Environment variables that can be used with gh",
 		long: heredoc.Docf(`
-			%[1]sGH_TOKEN%[1]s, %[1]sGITHUB_TOKEN%[1]s (in order of precedence): an authentication token for github.com
-			API requests. Setting this avoids being prompted to authenticate and takes precedence over
-			previously stored credentials.
+			%[1]sGH_TOKEN%[1]s, %[1]sGITHUB_TOKEN%[1]s (in order of precedence): an authentication token that will be used when
+			a command targets either %[1]sgithub.com%[1]s or a subdomain of %[1]sghe.com%[1]s. Setting this avoids being prompted to
+			authenticate and takes precedence over previously stored credentials.
 
 			%[1]sGH_ENTERPRISE_TOKEN%[1]s, %[1]sGITHUB_ENTERPRISE_TOKEN%[1]s (in order of precedence): an authentication
-			token for API requests to GitHub Enterprise. When setting this, also set %[1]sGH_HOST%[1]s.
+			token that will be used when a command targets a GitHub Enterprise Server host.
 
-			%[1]sGH_HOST%[1]s: specify the GitHub hostname for commands that would otherwise assume the
-			"github.com" host when not in a context of an existing repository. When setting this, 
-			also set %[1]sGH_ENTERPRISE_TOKEN%[1]s.
+			%[1]sGH_HOST%[1]s: specify the GitHub hostname for commands where a hostname has not been provided, or
+			cannot be inferred from the context of a local Git repository. If this host was previously
+			authenticated with, the stored credentials will be used. Otherwise, setting %[1]sGH_TOKEN%[1]s or
+			%[1]sGH_ENTERPRISE_TOKEN%[1]s is required, depending on the targeted host.
 
 			%[1]sGH_REPO%[1]s: specify the GitHub repository in the %[1]s[HOST/]OWNER/REPO%[1]s format for commands
 			that otherwise operate on a local repository.
@@ -80,16 +81,28 @@ var HelpTopics = []helpTopic{
 			%[1]sCLICOLOR_FORCE%[1]s: set to a value other than %[1]s0%[1]s to keep ANSI colors in output
 			even when the output is piped.
 
+			%[1]sGH_COLOR_LABELS%[1]s: set to any value to display labels using their RGB hex color codes in terminals that
+			support truecolor.
+
+			%[1]sGH_ACCESSIBLE_COLORS%[1]s (preview): set to a truthy value to use customizable, 4-bit accessible colors.
+
 			%[1]sGH_FORCE_TTY%[1]s: set to any value to force terminal-style output even when the output is
 			redirected. When the value is a number, it is interpreted as the number of columns
 			available in the viewport. When the value is a percentage, it will be applied against
 			the number of columns available in the current viewport.
 
-			%[1]sGH_NO_UPDATE_NOTIFIER%[1]s: set to any value to disable update notifications. By default, gh
-			checks for new releases once every 24 hours and displays an upgrade notice on standard
-			error if a newer version was found.
+			%[1]sGH_NO_UPDATE_NOTIFIER%[1]s: set to any value to disable GitHub CLI update notifications.
+			When any command is executed, gh checks for new versions once every 24 hours.
+			If a newer version was found, an upgrade notice is displayed on standard error.
 
-			%[1]sGH_CONFIG_DIR%[1]s: the directory where gh will store configuration files. If not specified, 
+			%[1]sGH_NO_EXTENSION_UPDATE_NOTIFIER%[1]s: set to any value to disable GitHub CLI extension update notifications.
+			When an extension is executed, gh checks for new versions for the executed extension once every 24 hours.
+			If a newer version was found, an upgrade notice is displayed on standard error.
+
+			%[1]sGH_EXTENSION%[1]s: set to %[1]s1%[1]s by gh when it invokes an extension, allowing an extension to
+			tell whether it was run as %[1]sgh <extension>%[1]s or directly as a standalone program.
+
+			%[1]sGH_CONFIG_DIR%[1]s: the directory where gh will store configuration files. If not specified,
 			the default value will be one of the following paths (in order of precedence):
 			  - %[1]s$XDG_CONFIG_HOME/gh%[1]s (if %[1]s$XDG_CONFIG_HOME%[1]s is set),
 			  - %[1]s$AppData/GitHub CLI%[1]s (on Windows if %[1]s$AppData%[1]s is set), or
@@ -98,8 +111,35 @@ var HelpTopics = []helpTopic{
 			%[1]sGH_PROMPT_DISABLED%[1]s: set to any value to disable interactive prompting in the terminal.
 
 			%[1]sGH_PATH%[1]s: set the path to the gh executable, useful for when gh can not properly determine
-			its own path such as in the cygwin terminal.
+			its own path such as in the cygwin terminal. gh also sets this when invoking extensions so they
+			can call back into the same gh executable.
+
+			%[1]sGH_MDWIDTH%[1]s: default maximum width for markdown render wrapping.  The max width of lines
+			wrapped on the terminal will be taken as the lesser of the terminal width, this value, or 120 if
+			not specified.  This value is used, for example, with %[1]spr view%[1]s subcommand.
+
+			%[1]sGH_ACCESSIBLE_PROMPTER%[1]s (preview): set to a truthy value to enable prompts that are
+			more compatible with speech synthesis and braille screen readers.
+
+			%[1]sGH_TELEMETRY%[1]s: set to %[1]slog%[1]s to print telemetry data to standard error instead of sending it.
+			Set to %[1]sfalse%[1]s or %[1]s0%[1]s to disable telemetry. Takes precedence over %[1]sDO_NOT_TRACK%[1]s.
+
+			%[1]sDO_NOT_TRACK%[1]s: set to %[1]strue%[1]s or %[1]s1%[1]s to disable telemetry. Ignored when
+			%[1]sGH_TELEMETRY%[1]s is set, which takes precedence.
+
+			%[1]sGH_SPINNER_DISABLED%[1]s: set to a truthy value to replace the spinner animation with
+			a textual progress indicator.
 		`, "`"),
+	},
+	{
+		name:  "telemetry",
+		short: "Information about telemetry in gh",
+		long: heredoc.Doc(`
+			gh collects telemetry to help us understand how the CLI is being used and to improve it.
+
+			To learn more about what data is collected, how it is used, and how to opt out, see:
+			<https://cli.github.com/telemetry>
+		`),
 	},
 	{
 		name:  "reference",
@@ -129,6 +169,7 @@ var HelpTopics = []helpTopic{
 
 			The %[1]s--template%[1]s flag requires a string argument in Go template syntax, and will only print
 			those JSON values which match the query.
+
 			In addition to the Go template functions in the standard library, the following functions can be used
 			with this formatting directive:
 			- %[1]sautocolor%[1]s: like %[1]scolor%[1]s, but only emits color to terminals
@@ -142,10 +183,18 @@ var HelpTopics = []helpTopic{
 			- %[1]struncate <length> <input>%[1]s: ensures input fits within length
 			- %[1]shyperlink <url> <text>%[1]s: renders a terminal hyperlink
 
+			The following Sprig template library functions can also be used with this formatting directive:
+			- %[1]scontains <arg> <string>%[1]s: checks if %[1]sstring%[1]s contains %[1]sarg%[1]s
+			- %[1]shasPrefix <prefix> <string>%[1]s: checks if %[1]sstring%[1]s starts with %[1]sprefix%[1]s
+			- %[1]shasSuffix <suffix> <string>%[1]s: checks if %[1]sstring%[1]s ends with %[1]ssuffix%[1]s
+			- %[1]sregexMatch <regex> <string>%[1]s: checks if %[1]sstring%[1]s has any matches for %[1]sregex%[1]s
+
+			For more information about the Sprig library, see <https://masterminds.github.io/sprig/>.
+
 			To learn more about Go templates, see: <https://golang.org/pkg/text/template/>.
 		`, "`"),
 		example: heredoc.Doc(`
-			# default output format
+			# Default output format
 			$ gh pr list
 			Showing 23 of 23 open pull requests in cli/cli
 
@@ -154,7 +203,7 @@ var HelpTopics = []helpTopic{
 			#125  An exciting new feature         feature-branch                   about 2 days ago
 
 
-			# adding the --json flag with a list of field names
+			# Adding the --json flag with a list of field names
 			$ gh pr list --json number,title,author
 			[
 			  {
@@ -181,13 +230,14 @@ var HelpTopics = []helpTopic{
 			]
 
 
-			# adding the --jq flag and selecting fields from the array
+			# Adding the --jq flag and selecting fields from the array
 			$ gh pr list --json author --jq '.[].author.login'
 			monalisa
 			codercat
 			cli-maintainer
 
-			# --jq can be used to implement more complex filtering and output changes:
+
+			# --jq can be used to implement more complex filtering and output changes
 			$ gh issue list --json number,title,labels --jq \
 			  'map(select((.labels | length) > 0))    # must have labels
 			  | map(.labels = (.labels | map(.name))) # show only the label names
@@ -218,11 +268,13 @@ var HelpTopics = []helpTopic{
 			      "title": "An exciting new feature"
 			    }
 			  ]
-			# using the --template flag with the hyperlink helper
-			gh issue list --json title,url --template '{{range .}}{{hyperlink .url .title}}{{"\n"}}{{end}}'
 
 
-			# adding the --template flag and modifying the display format
+			# Using the --template flag with the hyperlink helper
+			$ gh issue list --json title,url --template '{{range .}}{{hyperlink .url .title}}{{"\n"}}{{end}}'
+
+
+			# Adding the --template flag and modifying the display format
 			$ gh pr list --json number,title,headRefName,updatedAt --template \
 				'{{range .}}{{tablerow (printf "#%v" .number | autocolor "green") .title .headRefName (timeago .updatedAt)}}{{end}}'
 
@@ -231,7 +283,7 @@ var HelpTopics = []helpTopic{
 			#125  An exciting new feature     feature-branch            about 2 days ago
 
 
-			# a more complex example with the --template flag which formats a pull request using multiple tables with headers:
+			# A more complex example with the --template flag which formats a pull request using multiple tables with headers
 			$ gh pr view 3519 --json number,title,body,reviews,assignees --template \
 			'{{printf "#%v" .number}} {{.title}}
 

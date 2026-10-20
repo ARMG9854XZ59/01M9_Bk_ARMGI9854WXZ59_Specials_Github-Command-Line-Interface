@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/internal/codespaces"
 	"github.com/cli/cli/v2/internal/codespaces/api"
 	"github.com/cli/cli/v2/internal/codespaces/portforwarder"
@@ -150,8 +151,8 @@ var portFields = []string{
 	"browseUrl",
 }
 
-func (pi *portInfo) ExportData(fields []string) map[string]interface{} {
-	data := map[string]interface{}{}
+func (pi *portInfo) ExportData(fields []string) map[string]any {
+	data := map[string]any{}
 
 	for _, f := range fields {
 		switch f {
@@ -217,10 +218,12 @@ func getDevContainer(ctx context.Context, apiClient apiClient, codespace *api.Co
 
 func newPortsVisibilityCmd(app *App, selector *CodespaceSelector) *cobra.Command {
 	return &cobra.Command{
-		Use:     "visibility <port>:{public|private|org}...",
-		Short:   "Change the visibility of the forwarded port",
-		Example: "gh codespace ports visibility 80:org 3000:private 8000:public",
-		Args:    cobra.MinimumNArgs(1),
+		Use:   "visibility <port>:{public|private|org}...",
+		Short: "Change the visibility of the forwarded port",
+		Example: heredoc.Doc(`
+			$ gh codespace ports visibility 80:org 3000:private 8000:public
+		`),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return app.UpdatePortVisibility(cmd.Context(), selector, args)
 		},
@@ -296,17 +299,29 @@ func (a *App) parsePortVisibilities(args []string) ([]portVisibility, error) {
 // NewPortsForwardCmd returns a Cobra "ports forward" subcommand, which forwards a set of
 // port pairs from the codespace to localhost.
 func newPortsForwardCmd(app *App, selector *CodespaceSelector) *cobra.Command {
-	return &cobra.Command{
+	var allInterfaces bool
+
+	cmd := &cobra.Command{
 		Use:   "forward <remote-port>:<local-port>...",
 		Short: "Forward ports",
-		Args:  cobra.MinimumNArgs(1),
+		Long: heredoc.Docf(`
+			Forward ports from a codespace to your local machine.
+
+			Ports bind to loopback (%[1]s127.0.0.1%[1]s) by default. Use %[1]s--all-interfaces%[1]s
+			to bind to all interfaces.
+		`, "`"),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return app.ForwardPorts(cmd.Context(), selector, args)
+			return app.ForwardPorts(cmd.Context(), selector, args, allInterfaces)
 		},
 	}
+
+	cmd.Flags().BoolVar(&allInterfaces, "all-interfaces", false, "Listen on all network interfaces")
+
+	return cmd
 }
 
-func (a *App) ForwardPorts(ctx context.Context, selector *CodespaceSelector, ports []string) (err error) {
+func (a *App) ForwardPorts(ctx context.Context, selector *CodespaceSelector, ports []string, allInterfaces bool) (err error) {
 	portPairs, err := getPortPairs(ports)
 	if err != nil {
 		return fmt.Errorf("get port pairs: %w", err)
@@ -326,15 +341,14 @@ func (a *App) ForwardPorts(ctx context.Context, selector *CodespaceSelector, por
 	// them at the first failure, including cancellation of the context.
 	group, ctx := errgroup.WithContext(ctx)
 	for _, pair := range portPairs {
-		pair := pair
 		group.Go(func() error {
-			listen, _, err := codespaces.ListenTCP(pair.local, true)
+			listen, _, err := codespaces.ListenTCP(pair.local, allInterfaces)
 			if err != nil {
 				return err
 			}
 			defer listen.Close()
 
-			a.errLogger.Printf("Forwarding ports: remote %d <=> local %d", pair.remote, pair.local)
+			a.errLogger.Printf("Forwarding ports: remote %d <=> local %s", pair.remote, listen.Addr())
 			fwd, err := portforwarder.NewPortForwarder(ctx, codespaceConnection)
 			if err != nil {
 				return fmt.Errorf("failed to create port forwarder: %w", err)

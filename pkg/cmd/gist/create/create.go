@@ -17,7 +17,7 @@ import (
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/gh"
-	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/internal/safeurl"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/gist/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -48,30 +48,33 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 	}
 
 	cmd := &cobra.Command{
-		Use:   "create [<filename>... | -]",
+		Use:   "create [<filename>... | <pattern>... | -]",
 		Short: "Create a new gist",
 		Long: heredoc.Docf(`
 			Create a new GitHub gist with given contents.
 
 			Gists can be created from one or multiple files. Alternatively, pass %[1]s-%[1]s as
-			file name to read from standard input.
+			filename to read from standard input.
 
 			By default, gists are secret; use %[1]s--public%[1]s to make publicly listed ones.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# publish file 'hello.py' as a public gist
+			# Publish file 'hello.py' as a public gist
 			$ gh gist create --public hello.py
 
-			# create a gist with a description
+			# Create a gist with a description
 			$ gh gist create hello.py -d "my Hello-World program in Python"
 
-			# create a gist containing several files
+			# Create a gist containing several files
 			$ gh gist create hello.py world.py cool.txt
 
-			# read from standard input to create a gist
+			# Create a gist containing several files using patterns
+			$ gh gist create *.md *.txt artifact.*
+
+			# Read from standard input to create a gist
 			$ gh gist create -
 
-			# create a gist from output piped from another command
+			# Create a gist from output piped from another command
 			$ cat cool.txt | gh gist create
 		`),
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -102,12 +105,23 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 }
 
 func createRun(opts *CreateOptions) error {
-	fileArgs := opts.Filenames
-	if len(fileArgs) == 0 {
-		fileArgs = []string{"-"}
+
+	readFromStdInArg, filenames := cmdutil.Partition(opts.Filenames, func(f string) bool {
+		return f == "-"
+	})
+
+	filenames, err := cmdutil.GlobPaths(filenames)
+	if err != nil {
+		return err
 	}
 
-	files, err := processFiles(opts.IO.In, opts.FilenameOverride, fileArgs)
+	filenames = append(filenames, readFromStdInArg...)
+
+	if len(filenames) == 0 {
+		filenames = []string{"-"}
+	}
+
+	files, err := processFiles(opts.IO.In, opts.FilenameOverride, filenames)
 	if err != nil {
 		return fmt.Errorf("failed to collect files for posting: %w", err)
 	}
@@ -124,7 +138,7 @@ func createRun(opts *CreateOptions) error {
 			processMessage = fmt.Sprintf("Creating gist %s", gistName)
 		}
 	}
-	fmt.Fprintf(errOut, "%s %s\n", cs.Gray("-"), processMessage)
+	fmt.Fprintf(errOut, "%s %s\n", cs.Muted("-"), processMessage)
 
 	httpClient, err := opts.HttpClient()
 	if err != nil {
@@ -142,8 +156,7 @@ func createRun(opts *CreateOptions) error {
 	gist, err := createGist(httpClient, host, opts.Description, opts.Public, files)
 	opts.IO.StopProgressIndicator()
 	if err != nil {
-		var httpError api.HTTPError
-		if errors.As(err, &httpError) {
+		if httpError, ok := errors.AsType[api.HTTPError](err); ok {
 			if httpError.StatusCode == http.StatusUnprocessableEntity {
 				if detectEmptyFiles(files) {
 					fmt.Fprintf(errOut, "%s Failed to create gist: %s\n", cs.FailureIcon(), "a gist file cannot be blank")
@@ -258,22 +271,20 @@ func createGist(client *http.Client, hostname, description string, public bool, 
 		return nil, err
 	}
 
-	u := ghinstance.RESTPrefix(hostname) + "gists"
-	req, err := http.NewRequest(http.MethodPost, u, requestBody)
+	path, err := safeurl.JoinPath("gists")
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	resp, err := client.Do(req)
+	// TODO(api-client-rollout)
+	// This line of code is part of a mechanical roll out of the api client.
+	// As a follow up, consider whether the api client can be injected to this call site, rather than constructed
+	resp, err := api.NewClientFromHTTP(client).Request(hostname, http.MethodPost, path.String(), requestBody,
+		api.WithEndpointScopes("gist"))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode > 299 {
-		return nil, api.HandleHTTPError(api.EndpointNeedsScopes(resp, "gist"))
-	}
 
 	result := &shared.Gist{}
 	dec := json.NewDecoder(resp.Body)

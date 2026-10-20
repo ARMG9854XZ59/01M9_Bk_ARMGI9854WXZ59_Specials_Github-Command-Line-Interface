@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,7 +17,6 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 
-	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,15 +24,26 @@ import (
 
 var artifactPath = test.NormalizeRelativePath("../test/data/sigstore-js-2.1.0.tgz")
 
+func expectedFilePath(tempDir string, digestWithAlg string) string {
+	var filename string
+	if runtime.GOOS == "windows" {
+		filename = fmt.Sprintf("%s.jsonl", strings.ReplaceAll(digestWithAlg, ":", "-"))
+	} else {
+		filename = fmt.Sprintf("%s.jsonl", digestWithAlg)
+	}
+
+	return test.NormalizeRelativePath(fmt.Sprintf("%s/%s", tempDir, filename))
+}
+
 func TestNewDownloadCmd(t *testing.T) {
 	testIO, _, _, _ := iostreams.Test()
 	f := &cmdutil.Factory{
 		IOStreams: testIO,
 		HttpClient: func() (*http.Client, error) {
-			reg := &httpmock.Registry{}
-			client := &http.Client{}
-			httpmock.ReplaceTripper(client, reg)
-			return client, nil
+			return nil, nil
+		},
+		ExternalHttpClient: func() (*http.Client, error) {
+			return nil, nil
 		},
 	}
 
@@ -201,9 +214,10 @@ func TestRunDownload(t *testing.T) {
 		artifact, err := artifact.NewDigestedArtifact(baseOpts.OCIClient, baseOpts.ArtifactPath, baseOpts.DigestAlgorithm)
 		require.NoError(t, err)
 
-		require.FileExists(t, fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		expectedFilePath := expectedFilePath(tempDir, artifact.DigestWithAlg())
+		require.FileExists(t, expectedFilePath)
 
-		actualLineCount, err := countLines(fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		actualLineCount, err := countLines(expectedFilePath)
 		require.NoError(t, err)
 
 		expectedLineCount := 2
@@ -221,9 +235,10 @@ func TestRunDownload(t *testing.T) {
 		artifact, err := artifact.NewDigestedArtifact(opts.OCIClient, opts.ArtifactPath, opts.DigestAlgorithm)
 		require.NoError(t, err)
 
-		require.FileExists(t, fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		expectedFilePath := expectedFilePath(tempDir, artifact.DigestWithAlg())
+		require.FileExists(t, expectedFilePath)
 
-		actualLineCount, err := countLines(fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		actualLineCount, err := countLines(expectedFilePath)
 		require.NoError(t, err)
 
 		expectedLineCount := 2
@@ -240,9 +255,10 @@ func TestRunDownload(t *testing.T) {
 		artifact, err := artifact.NewDigestedArtifact(opts.OCIClient, opts.ArtifactPath, opts.DigestAlgorithm)
 		require.NoError(t, err)
 
-		require.FileExists(t, fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		expectedFilePath := expectedFilePath(tempDir, artifact.DigestWithAlg())
+		require.FileExists(t, expectedFilePath)
 
-		actualLineCount, err := countLines(fmt.Sprintf("%s/%s.jsonl", tempDir, artifact.DigestWithAlg()))
+		actualLineCount, err := countLines(expectedFilePath)
 		require.NoError(t, err)
 
 		expectedLineCount := 2
@@ -260,8 +276,8 @@ func TestRunDownload(t *testing.T) {
 	t.Run("no attestations found", func(t *testing.T) {
 		opts := baseOpts
 		opts.APIClient = api.MockClient{
-			OnGetByOwnerAndDigest: func(repo, digest string, limit int) ([]*api.Attestation, error) {
-				return nil, api.ErrNoAttestations{}
+			OnGetByDigest: func(params api.FetchParams) ([]*api.Attestation, error) {
+				return nil, api.ErrNoAttestationsFound
 			},
 		}
 
@@ -276,7 +292,7 @@ func TestRunDownload(t *testing.T) {
 	t.Run("failed to fetch attestations", func(t *testing.T) {
 		opts := baseOpts
 		opts.APIClient = api.MockClient{
-			OnGetByOwnerAndDigest: func(repo, digest string, limit int) ([]*api.Attestation, error) {
+			OnGetByDigest: func(params api.FetchParams) ([]*api.Attestation, error) {
 				return nil, fmt.Errorf("failed to fetch attestations")
 			},
 		}
@@ -310,5 +326,27 @@ func TestRunDownload(t *testing.T) {
 		err := runDownload(&opts)
 		require.Error(t, err)
 		require.ErrorAs(t, err, &ErrAttestationFileCreation)
+	})
+
+	t.Run("replaces destination symlink without following it", func(t *testing.T) {
+		opts := baseOpts
+		outputDir := t.TempDir()
+		opts.Store = NewLiveStore(outputDir)
+
+		digested, err := artifact.NewDigestedArtifact(opts.OCIClient, opts.ArtifactPath, opts.DigestAlgorithm)
+		require.NoError(t, err)
+		metadataPath := opts.Store.(*LiveStore).createJSONLinesFilePath(digested.DigestWithAlg())
+		targetPath := filepath.Join(outputDir, "target.jsonl")
+		require.NoError(t, os.WriteFile(targetPath, []byte("unchanged"), 0o644))
+		require.NoError(t, os.Symlink(filepath.Base(targetPath), metadataPath))
+
+		require.NoError(t, runDownload(&opts))
+
+		info, err := os.Lstat(metadataPath)
+		require.NoError(t, err)
+		assert.Zero(t, info.Mode()&os.ModeSymlink)
+		target, err := os.ReadFile(targetPath)
+		require.NoError(t, err)
+		assert.Equal(t, "unchanged", string(target))
 	})
 }

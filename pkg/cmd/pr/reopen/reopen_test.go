@@ -53,7 +53,7 @@ func TestPRReopen(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	shared.RunCommandFinder("123", &api.PullRequest{
+	shared.StubFinderForRunCommandStyleTests(t, "123", &api.PullRequest{
 		ID:     "THE-ID",
 		Number: 123,
 		State:  "CLOSED",
@@ -63,7 +63,7 @@ func TestPRReopen(t *testing.T) {
 	http.Register(
 		httpmock.GraphQL(`mutation PullRequestReopen\b`),
 		httpmock.GraphQLMutation(`{"id": "THE-ID"}`,
-			func(inputs map[string]interface{}) {
+			func(inputs map[string]any) {
 				assert.Equal(t, inputs["pullRequestId"], "THE-ID")
 			}),
 	)
@@ -78,7 +78,7 @@ func TestPRReopen_alreadyOpen(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	shared.RunCommandFinder("123", &api.PullRequest{
+	shared.StubFinderForRunCommandStyleTests(t, "123", &api.PullRequest{
 		ID:     "THE-ID",
 		Number: 123,
 		State:  "OPEN",
@@ -95,7 +95,7 @@ func TestPRReopen_alreadyMerged(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	shared.RunCommandFinder("123", &api.PullRequest{
+	shared.StubFinderForRunCommandStyleTests(t, "123", &api.PullRequest{
 		ID:     "THE-ID",
 		Number: 123,
 		State:  "MERGED",
@@ -112,7 +112,7 @@ func TestPRReopen_withComment(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	shared.RunCommandFinder("123", &api.PullRequest{
+	shared.StubFinderForRunCommandStyleTests(t, "123", &api.PullRequest{
 		ID:     "THE-ID",
 		Number: 123,
 		State:  "CLOSED",
@@ -125,7 +125,7 @@ func TestPRReopen_withComment(t *testing.T) {
 		{ "data": { "addComment": { "commentEdge": { "node": {
 			"url": "https://github.com/OWNER/REPO/issues/123#issuecomment-456"
 		} } } } }`,
-			func(inputs map[string]interface{}) {
+			func(inputs map[string]any) {
 				assert.Equal(t, "THE-ID", inputs["subjectId"])
 				assert.Equal(t, "reopening comment", inputs["body"])
 			}),
@@ -133,7 +133,7 @@ func TestPRReopen_withComment(t *testing.T) {
 	http.Register(
 		httpmock.GraphQL(`mutation PullRequestReopen\b`),
 		httpmock.GraphQLMutation(`{"id": "THE-ID"}`,
-			func(inputs map[string]interface{}) {
+			func(inputs map[string]any) {
 				assert.Equal(t, inputs["pullRequestId"], "THE-ID")
 			}),
 	)

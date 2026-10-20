@@ -42,10 +42,10 @@ func newCmdList(f *cmdutil.Factory, runF func(*listOptions) error) *cobra.Comman
 			This behavior cannot be configured with the %[1]s--order%[1]s or %[1]s--sort%[1]s flags.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# sort labels by name
+			# Sort labels by name
 			$ gh label list --sort name
 
-			# find labels with "bug" in the name or description
+			# Find labels with "bug" in the name or description
 			$ gh label list --search bug
 		`),
 		Args:    cobra.NoArgs,
@@ -137,7 +137,12 @@ func printLabels(io *iostreams.IOStreams, labels []label) error {
 	table := tableprinter.New(io, tableprinter.WithHeader("NAME", "DESCRIPTION", "COLOR"))
 
 	for _, label := range labels {
-		table.AddField(label.Name, tableprinter.WithColor(cs.ColorFromRGB(label.Color)))
+		// Colorize the label using tableprinter's WithColor function for it to handle non-TTY situations
+		labelColor := tableprinter.WithColor(func(s string) string {
+			return cs.Label(label.Color, s)
+		})
+
+		table.AddField(label.Name, labelColor)
 		table.AddField(label.Description)
 		table.AddField("#" + label.Color)
 

@@ -65,14 +65,19 @@ func FuzzyAgoAbbr(a, b time.Time) string {
 	return b.Format("Jan _2, 2006")
 }
 
-// DisplayURL returns a copy of the string urlStr removing everything except the hostname and path.
+// DisplayURL returns a copy of the string urlStr removing everything except the scheme, hostname, and path.
+// If the scheme is not specified, "https" is assumed.
 // If there is an error parsing urlStr then urlStr is returned without modification.
 func DisplayURL(urlStr string) string {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return urlStr
 	}
-	return u.Hostname() + u.Path
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + u.Hostname() + u.Path
 }
 
 // RemoveDiacritics returns the input value without "diacritics", or accent marks
@@ -143,4 +148,27 @@ func FormatSlice(values []string, lineLength uint, indent uint, prependWith stri
 		}
 	}
 	return builder.String()
+}
+
+// FormatSize formats a byte count using binary units (B, KB, MB, GB, TB, PB).
+// Values below a kilobyte are shown as whole bytes; larger values are shown with
+// one decimal place of precision.
+func FormatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+
+	// Stop at the largest known unit so an out-of-range index can never occur,
+	// even for byte counts beyond a petabyte.
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < len(units)-1; v /= unit {
+		div *= unit
+		exp++
+	}
+
+	value := float64(n) / float64(div)
+	return fmt.Sprintf("%.1f %s", value, units[exp])
 }

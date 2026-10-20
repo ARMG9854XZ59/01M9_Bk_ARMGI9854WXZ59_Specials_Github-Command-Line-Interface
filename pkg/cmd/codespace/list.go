@@ -35,6 +35,12 @@ func newListCmd(app *App) *cobra.Command {
 		Aliases: []string{"ls"},
 		Args:    noArgsConstraint,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if opts.repo != "" {
+				if err := validateNWO(opts.repo); err != nil {
+					return cmdutil.FlagErrorf("invalid value for --repo: %v", err)
+				}
+			}
+
 			if err := cmdutil.MutuallyExclusive(
 				"using `--org` or `--user` with `--repo` is not allowed",
 				opts.repo != "",
@@ -152,7 +158,7 @@ func (a *App) List(ctx context.Context, opts *listOptions, exporter cmdutil.Expo
 		case false:
 			nameColor = cs.Yellow
 		case true:
-			nameColor = cs.Gray
+			nameColor = cs.Muted
 		}
 
 		tp.AddField(formattedName, tableprinter.WithColor(nameColor))
@@ -172,7 +178,7 @@ func (a *App) List(ctx context.Context, opts *listOptions, exporter cmdutil.Expo
 		if err != nil {
 			return fmt.Errorf("error parsing date %q: %w", c.CreatedAt, err)
 		}
-		tp.AddTimeField(time.Now(), ct, cs.Gray)
+		tp.AddTimeField(time.Now(), ct, cs.Muted)
 
 		if hasNonProdVSCSTarget {
 			tp.AddField(c.VSCSTarget)

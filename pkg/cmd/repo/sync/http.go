@@ -10,6 +10,7 @@ import (
 
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/safeurl"
 )
 
 type commit struct {
@@ -25,19 +26,22 @@ type commit struct {
 
 func latestCommit(client *api.Client, repo ghrepo.Interface, branch string) (commit, error) {
 	var response commit
-	path := fmt.Sprintf("repos/%s/%s/git/refs/heads/%s", repo.RepoOwner(), repo.RepoName(), branch)
-	err := client.REST(repo.RepoHost(), "GET", path, nil, &response)
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "git", "refs", fmt.Sprintf("heads/%s", branch))
+	if err != nil {
+		return response, err
+	}
+	err = client.REST(repo.RepoHost(), "GET", path.String(), nil, &response)
 	return response, err
 }
 
 type upstreamMergeErr struct{ error }
 
-var missingWorkflowScopeRE = regexp.MustCompile("refusing to allow.*without `workflow` scope")
-var missingWorkflowScopeErr = errors.New("Upstream commits contain workflow changes, which require the `workflow` scope to merge. To request it, run: gh auth refresh -s workflow")
+var missingWorkflowScopeRE = regexp.MustCompile("refusing to allow.*without `workflow(s)?` (scope|permission)")
+var missingWorkflowScopeErr = errors.New("Upstream commits contain workflow changes, which require the `workflow` scope or permission to merge. To request it, run: gh auth refresh -s workflow")
 
 func triggerUpstreamMerge(client *api.Client, repo ghrepo.Interface, branch string) (string, error) {
 	var payload bytes.Buffer
-	if err := json.NewEncoder(&payload).Encode(map[string]interface{}{
+	if err := json.NewEncoder(&payload).Encode(map[string]any{
 		"branch": branch,
 	}); err != nil {
 		return "", err
@@ -48,10 +52,12 @@ func triggerUpstreamMerge(client *api.Client, repo ghrepo.Interface, branch stri
 		MergeType  string `json:"merge_type"`
 		BaseBranch string `json:"base_branch"`
 	}
-	path := fmt.Sprintf("repos/%s/%s/merge-upstream", repo.RepoOwner(), repo.RepoName())
-	var httpErr api.HTTPError
-	if err := client.REST(repo.RepoHost(), "POST", path, &payload, &response); err != nil {
-		if errors.As(err, &httpErr) {
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "merge-upstream")
+	if err != nil {
+		return "", err
+	}
+	if err := client.REST(repo.RepoHost(), "POST", path.String(), &payload, &response); err != nil {
+		if httpErr, ok := errors.AsType[api.HTTPError](err); ok {
 			switch httpErr.StatusCode {
 			case http.StatusUnprocessableEntity, http.StatusConflict:
 				if missingWorkflowScopeRE.MatchString(httpErr.Message) {
@@ -66,8 +72,11 @@ func triggerUpstreamMerge(client *api.Client, repo ghrepo.Interface, branch stri
 }
 
 func syncFork(client *api.Client, repo ghrepo.Interface, branch, SHA string, force bool) error {
-	path := fmt.Sprintf("repos/%s/%s/git/refs/heads/%s", repo.RepoOwner(), repo.RepoName(), branch)
-	body := map[string]interface{}{
+	path, err := safeurl.JoinPath("repos", repo.RepoOwner(), repo.RepoName(), "git", "refs", fmt.Sprintf("heads/%s", branch))
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
 		"sha":   SHA,
 		"force": force,
 	}
@@ -76,5 +85,5 @@ func syncFork(client *api.Client, repo ghrepo.Interface, branch, SHA string, for
 		return err
 	}
 	requestBody := bytes.NewReader(requestByte)
-	return client.REST(repo.RepoHost(), "PATCH", path, requestBody, nil)
+	return client.REST(repo.RepoHost(), "PATCH", path.String(), requestBody, nil)
 }
